@@ -91,6 +91,7 @@
       <h1>① 输入卡密</h1>
       <input id="card" placeholder="卡密，如 ABCD-EFGH-JKLM" autocomplete="off" />
       <button class="ghost" id="btn-verify">验证卡密</button>
+      <button class="ghost" id="btn-clear" style="display:none;margin-top:8px;font-size:13px;">清除已保存卡密</button>
       <div class="info" id="card-info"></div>
     </div>
 
@@ -273,29 +274,75 @@ document.querySelectorAll(".tab").forEach(t => t.onclick = () => {
   $("panel-" + t.dataset.tab).classList.add("active");
 });
 
-// ---------- 卡密校验 ----------
-$("btn-verify").onclick = async () => {
-  const code = $("card").value.trim().toUpperCase();
-  if (!code) { $("card-info").innerHTML = `<span class="bad">请输入卡密</span>`; return; }
-  const { data } = await api("/api/card/verify", { code });
-  if (!data.ok) {
-    const msg = { not_found:"卡密不存在", disabled:"卡密已停用", expired:"卡密已过期", no_quota:"卡密次数已用完" }[data.reason] || "验证失败";
-    $("card-info").innerHTML = `<span class="bad">${msg}</span>`;
-    $("create-form").classList.add("hidden");
-    return;
-  }
-  currentCard = code;
+// ---------- 卡密校验 + 记住登录态（localStorage） ----------
+const LS_CARD = "mkb_card_v1";
+function saveCard(code){ try { localStorage.setItem(LS_CARD, code); } catch(e){} }
+function loadCard(){ try { return localStorage.getItem(LS_CARD) || ""; } catch(e){ return ""; } }
+function clearCard(){ try { localStorage.removeItem(LS_CARD); } catch(e){} }
+function syncCards(code){ $("card").value = code; $("c-card").value = code; }
+
+function renderCardInfo(data) {
   const exp = data.expires_at ? new Date(data.expires_at * 1000).toLocaleDateString() : "长期有效";
   const maxMin = data.max_duration_min || 180;
   const maxH = Math.floor(maxMin / 60);
   $("card-info").innerHTML = `<span class="ok">卡密有效</span><br>剩余次数：<b>${data.remaining}</b> / ${data.quota}　有效期至：<b>${exp}</b><br>单次最长：<b>${maxH} 小时</b>`;
-  // 预填默认时间
-  startTs = defaultStart();
-  endTs = startTs + 10800;
-  $("start").classList.remove("empty"); $("start").querySelector(".ph").textContent = fmtField(startTs);
-  $("end").classList.remove("empty"); $("end").querySelector(".ph").textContent = fmtField(endTs);
+}
+
+const CARD_MSG = { not_found:"卡密不存在", disabled:"卡密已停用", expired:"卡密已过期", no_quota:"卡密次数已用完" };
+
+// verifyCard：校验卡密并展开表单；opts.prefillTime 控制是否重置默认时间；opts.silent 不弹错误提示
+async function verifyCard(code, opts = {}) {
+  const { prefillTime = true, silent = false } = opts;
+  code = (code || "").trim().toUpperCase();
+  if (!code) { if (!silent) $("card-info").innerHTML = `<span class="bad">请输入卡密</span>`; return false; }
+  const { data } = await api("/api/card/verify", { code });
+  if (!data.ok) {
+    clearCard();
+    $("btn-clear").style.display = "none";
+    if (!silent) {
+      $("card-info").innerHTML = `<span class="bad">${CARD_MSG[data.reason] || "验证失败"}</span>`;
+      $("create-form").classList.add("hidden");
+    }
+    return false;
+  }
+  currentCard = code;
+  saveCard(code);
+  syncCards(code);
+  $("btn-clear").style.display = "block";
+  renderCardInfo(data);
+  if (prefillTime) {
+    startTs = defaultStart();
+    endTs = startTs + 10800;
+    $("start").classList.remove("empty"); $("start").querySelector(".ph").textContent = fmtField(startTs);
+    $("end").classList.remove("empty"); $("end").querySelector(".ph").textContent = fmtField(endTs);
+  }
   $("create-form").classList.remove("hidden");
+  return true;
+}
+
+$("btn-verify").onclick = async () => {
+  await verifyCard($("card").value);
 };
+
+// 清除已保存卡密（共用设备 / 换卡时使用）
+$("btn-clear").onclick = () => {
+  clearCard();
+  $("card").value = ""; $("c-card").value = "";
+  currentCard = "";
+  $("btn-clear").style.display = "none";
+  $("create-form").classList.add("hidden");
+  $("create-result").classList.add("hidden");
+  $("card-info").innerHTML = "";
+};
+
+// 页面加载：若已记住卡密，自动回填并校验（免去重复输入）
+(function autoRestore(){
+  const saved = loadCard();
+  if (saved) {
+    syncCards(saved);
+    verifyCard(saved, { prefillTime: true });
+  }
+})();
 
 // ---------- 创建会议（异步 + 进度条） ----------
 function showProgress(){ $("prog-mask").classList.add("show"); $("prog-bar").style.width = "0%"; $("prog-step").textContent = "正在准备…"; }
@@ -335,6 +382,8 @@ $("btn-create").onclick = async () => {
         $("invite-box").textContent = fmtInvite(d.invite);
         $("create-result").classList.remove("hidden");
         $("create-result").scrollIntoView({ behavior: "smooth" });
+        // 建会成功后刷新剩余次数（已消耗 1 次）
+        verifyCard(currentCard, { prefillTime: false, silent: true });
       } else {
         hideProgress();
         const err = d.error || {};
