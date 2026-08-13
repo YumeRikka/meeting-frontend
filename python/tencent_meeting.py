@@ -76,9 +76,9 @@ def _request(method, uri, body_str="", timeout=None):
             resp = requests.post(f"https://{HOST}{uri}", headers=headers, data=body_str.encode("utf-8"), timeout=_to)
     except Exception as e:
         # 超时=5s 却耗时远超 → 卡在 DNS/代理（requests 的 timeout 不覆盖 DNS），属外部网络问题
-        print(f"[rest] {method} {uri} 失败，耗时={_t.monotonic()-ts:.2f}s（timeout={_to}s）: {e}")
+        print(f"[rest] {method} {uri} 失败，耗时={_t.monotonic()-ts:.2f}s（timeout={_to}s）: {e}", flush=True)
         raise
-    print(f"[rest] {method} {uri} 耗时={_t.monotonic()-ts:.2f}s status={resp.status_code}")
+    print(f"[rest] {method} {uri} 耗时={_t.monotonic()-ts:.2f}s status={resp.status_code}", flush=True)
     if resp.status_code != 200:
         try:
             data = resp.json()
@@ -308,7 +308,7 @@ def _lookup_meeting_by_subject(userid, subject, start_ts):
             print(f"[lookup] 第{attempt}次：返回 {len(meetings)} 个会议，"
                   f"主题匹配 {subj_matched} 个"
                   + (f"，异常={diag.get('error')}" if diag.get("error") else "")
-                  + (f"，命中会议号={best.get('meeting_code')}" if best else "，未命中"))
+                  + (f"，命中会议号={best.get('meeting_code')}" if best else "，未命中"), flush=True)
             last_diag = diag
             if best is not None:
                 result["code"] = best.get("meeting_code", "")
