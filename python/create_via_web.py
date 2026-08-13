@@ -298,8 +298,10 @@ def _set_date_input(sched, inp, date_str):
 
 
 def _pick_closest_time(sched, picker_loc, hh, mm):
-    """在已展开的时间列表里选 HH:MM。
-    优先精确匹配；若列表（如某些版本仅提供 :00/:30）没有该分钟，则就近取整后点击，
+    """在已展开的时间列表里选 HH:MM（支持任意分钟）。
+    腾讯会议时间选择器是可滚动列表，可能为虚拟渲染（仅渲染当前可见的若干项），
+    因此这里逐屏滚动并读取可见项，命中精确 hh:mm 即点击；
+    仅当整个列表确实不存在该分钟档位（极少见）时才就近取整兜底。
     返回 (h, m, snapped)，snapped=True 表示发生了取整。"""
     # 入参可能是字符串（来自 strftime），统一转 int，避免 diff() 里出现 str 运算
     hh = int(hh)
@@ -309,21 +311,35 @@ def _pick_closest_time(sched, picker_loc, hh, mm):
     n = items.count()
     if n == 0:
         raise RuntimeError("时间列表为空，无法选择时间")
-    cands = []
-    for i in range(n):
+
+    def read(i):
         it = items.nth(i)
         try:
             h = int((it.locator("input.hour").get_attribute("value") or -1))
             m = int((it.locator("input.minute").get_attribute("value") or -1))
         except Exception:
             h = m = -1
-        cands.append((h, m, i))
-    # 1) 精确匹配
-    for (h, m, i) in cands:
-        if h == hh and m == mm:
-            items.nth(i).click(force=True)
-            return h, m, False
-    # 2) 就近取整（列表只提供部分档位时）
+        return h, m, i
+
+    # 逐屏滚动查找精确匹配（应对虚拟滚动只渲染可见项的情况）
+    for _ in range(400):
+        for i in range(n):
+            h, m, idx = read(i)
+            if h == hh and m == mm:
+                items.nth(idx).click(force=True)
+                return h, m, False
+        # 未命中：向下滚动一屏并等待新项渲染
+        try:
+            top_before = list_loc.evaluate("el => el.scrollTop")
+            list_loc.evaluate("el => el.scrollBy(0, el.clientHeight)")
+            sched.wait_for_timeout(60)
+            top_after = list_loc.evaluate("el => el.scrollTop")
+            if top_after == top_before:  # 已到底部，无法继续
+                break
+        except Exception:
+            break
+    # 兜底：就近取整（仅当列表确实无该分钟档位）
+    cands = [read(i) for i in range(n)]
     valid = [c for c in cands if c[0] >= 0]
     if not valid:
         raise RuntimeError(f"时间列表无可选项，无法选择 {hh}:{mm}")
@@ -337,7 +353,7 @@ def _pick_closest_time(sched, picker_loc, hh, mm):
 
 def _set_time_picker(sched, picker_loc, hh, mm):
     """在自定义时间选择器（<section class="custom-time-picker">）里选 HH:MM。
-    不再强制 :00/:30，支持任意分钟（列表不支持时自动就近取整）。"""
+    支持任意分钟：优先精确匹配，列表为虚拟滚动时自动滚动查找，仅极少见无该档位才就近取整。"""
     # 1) 打开下拉：优先点 caret 图标（.symbol 容器），避免点到内部 input 只聚焦不展开
     try:
         caret = picker_loc.locator(".symbol, .met-icon-caret-down--filled")
@@ -373,7 +389,7 @@ def _set_time(sched, start_ts, end_ts, on_progress=None):
     """设置开始/结束时间。腾讯会议网页端真实控件（已用 --inspect 校准）：
       日期：<input placeholder="选择日期" value="YYYY/MM/DD">（可文本填写）
       时间：<section class="custom-time-picker"> 自定义选择器，支持任意分钟
-            （列表仅部分档位时就近取整，见 _set_time_picker）。
+            （优先精确匹配；列表为虚拟滚动时自动滚动查找，仅极少见无该档位才就近取整）。
     不再强制对齐到 :00/:30；仅做「不能早于当前时间」与「结束晚于开始」的兜底校正。"""
     if on_progress:
         on_progress(3, PROGRESS_STEPS[3])
