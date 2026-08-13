@@ -205,16 +205,18 @@ def _raw_create(subject, start_ts, duration_min, host_userid):
 
 def _lookup_meeting_by_subject(userid, subject, start_ts):
     """网页建会后，用 REST 查询（不限频）反查刚建的会议，拿到会议号+入会链接。
-    按 subject 模糊匹配 + 开始时间就近（±2 小时窗口）挑选，返回 (meeting_code, join_url)。
+    按 subject 模糊匹配挑选；为避免「网页设的时间与请求时间有偏差」导致漏匹配，时间窗口放宽到
+    ±7 天，并在匹配项中优先选【开始时间最靠后（最新创建）】的会议，确保返回的是刚建的那场。
     找不到返回 ('', '')。"""
     import time as _t
     start_ts = int(start_ts)
+    WIN = 7 * 24 * 3600  # ±7 天
     for _ in range(6):  # 最多重试 6 次（间隔 2s，约 12s），等 REST 侧可见
         try:
             meetings = get_meetings(userid)
         except Exception:
             meetings = []
-        best, best_diff = None, None
+        best, best_st = None, None
         for m in meetings:
             ms = (m.get("subject") or "")
             if subject not in ms and ms not in subject:
@@ -223,11 +225,11 @@ def _lookup_meeting_by_subject(userid, subject, start_ts):
                 mst = int(m.get("start_time") or 0)
             except (TypeError, ValueError):
                 mst = 0
-            if abs(mst - start_ts) > 7200:  # 仅考虑 ±2 小时内的会议，避免误匹配旧会议
+            if abs(mst - start_ts) > WIN:  # 仅排除明显无关的旧会议（±7 天）
                 continue
-            diff = abs(mst - start_ts)
-            if best_diff is None or diff < best_diff:
-                best_diff, best = diff, m
+            # 优先选开始时间最靠后（最新创建）的会议 → 刚建的那场
+            if best_st is None or mst > best_st:
+                best_st, best = mst, m
         if best is not None:
             return best.get("meeting_code", ""), best.get("join_url", "")
         _t.sleep(2)

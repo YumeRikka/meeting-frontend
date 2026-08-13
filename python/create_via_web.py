@@ -285,16 +285,78 @@ def login_once(userid, account=None, password=None, headless=False, qr=False):
 
 # ---------- 建会 ----------
 def _set_date_input(sched, inp, date_str):
-    """React 兼容地设置日期文本输入框（placeholder="选择日期"，显示 YYYY/MM/DD）。"""
-    inp.evaluate(
-        """(el, val) => {
-            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-            setter.call(el, val);
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-        }""",
-        date_str,
-    )
+    """用日历弹层点选设置日期（受控 React 组件，自由键入文本不提交，必须走日历点选）。
+    date_str 形如 'YYYY/MM/DD'。"""
+    import re as _re
+    m = _re.match(r"(\d{4})/(\d{1,2})/(\d{1,2})", date_str or "")
+    if not m:
+        print(f"[time] 日期格式异常: {date_str!r}，跳过日期设置")
+        return
+    ty, tm, td = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    try:
+        inp.click(timeout=5000)  # 打开日历 portal
+        sched.wait_for_timeout(700)
+        cal = sched.locator(".met-calendar").first
+        if cal.count() == 0:
+            raise RuntimeError("未找到 .met-calendar 日历弹层")
+        # 翻到目标年月
+        for _ in range(24):
+            title = cal.evaluate(
+                """(el) => {
+                    const t = (el.innerText || '').match(/(\\d{4})年\\s*(\\d{1,2})月/);
+                    return t ? {y: +t[1], m: +t[2]} : null;
+                }"""
+            )
+            if not title:
+                break
+            if title["y"] == ty and title["m"] == tm:
+                break
+            if (ty > title["y"]) or (ty == title["y"] and tm > title["m"]):
+                nav = sched.locator(
+                    "xpath=//a[contains(@class,'met-pagination__turnbtn')]"
+                    "[.//i[contains(@class,'arrow-right-light')]]"
+                ).first
+            else:
+                nav = sched.locator(
+                    "xpath=//a[contains(@class,'met-pagination__turnbtn')]"
+                    "[.//i[contains(@class,'arrow-left-light')]]"
+                ).first
+            if nav.count() == 0:
+                break
+            nav.click(timeout=3000)
+            sched.wait_for_timeout(300)
+        # 点选目标日：当前月、未禁用、且非相邻月溢出(--ou)
+        cells = cal.locator(".met-calendar__cell")
+        n = cells.count()
+        clicked = False
+        for i in range(n):
+            cell = cells.nth(i)
+            cls = (cell.get_attribute("class") or "")
+            txt = (cell.inner_text() or "").strip()
+            if txt == str(td) and "is-disabled" not in cls and "--ou" not in cls:
+                cell.click(timeout=3000)
+                clicked = True
+                break
+        sched.wait_for_timeout(300)
+        if not clicked:
+            raise RuntimeError(f"日历中未找到可选的目标日 {td}（{date_str}）")
+        print(f"[time] 日历已选日期 {date_str}")
+        return
+    except Exception as e:
+        print(f"[time] 日历设置日期失败，回退 JS setter: {e}")
+    # 兜底：JS setter（通常不更新 React state，仅作最后尝试）
+    try:
+        inp.evaluate(
+            """(el, val) => {
+                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                setter.call(el, val);
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            }""",
+            date_str,
+        )
+    except Exception as e:
+        print(f"[time] JS setter 设置日期也失败: {e}")
 
 
 def _pick_closest_time(sched, picker_loc, hh, mm):
@@ -354,36 +416,43 @@ def _set_time_picker(sched, picker_loc, hh, mm):
         except Exception:
             pass
     sched.wait_for_timeout(400)
-    # 2) 优先：直接给选择器自身的 hour/minute 输入框赋值（任意分钟）
+    # 2) 优先：真实键盘输入 hour/minute（与主题框同一套 —— 只有真实输入事件才能把值
+    #    持久写进 React state；JS setter / 直接改 input.value 只改 DOM，提交前被重渲染冲掉）。
+    #    关键：每设完一个选择器必须 Escape 关掉它的下拉，否则它悬在下层选择器之上，
+    #    下一次点击会落空（开始时间停在默认 00:00 就是这个原因）。
     try:
-        res = picker_loc.evaluate(
-            """(el, args) => {
-                const hh = args[0], mm = args[1];
-                const hIn = el.querySelector('input.hour');
-                const mIn = el.querySelector('input.minute');
-                if (!hIn || !mIn) return 'no-input';
-                const setVal = (inp, v) => {
-                    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                    setter.call(inp, v);
-                    inp.dispatchEvent(new Event('input', { bubbles: true }));
-                    inp.dispatchEvent(new Event('change', { bubbles: true }));
-                };
-                const H = String(hh).padStart(2, '0'), M = String(mm).padStart(2, '0');
-                setVal(hIn, H); setVal(mIn, M);
-                return (hIn.value === H && mIn.value === M) ? 'ok' : 'mismatch';
-            }""",
-            [hh, mm],
-        )
-        if res == 'ok':
+        sched.keyboard.press("Escape")  # 关掉上一个可能还开着的下拉
+        sched.wait_for_timeout(150)
+        hIn = picker_loc.locator("input.hour").first
+        mIn = picker_loc.locator("input.minute").first
+        if hIn.count() > 0 and mIn.count() > 0:
+            hIn.click(timeout=3000)
+            sched.keyboard.press("Control+a")
+            sched.keyboard.type(f"{hh:02d}", delay=20)
+            mIn.click(timeout=3000)
+            sched.keyboard.press("Control+a")
+            sched.keyboard.type(f"{mm:02d}", delay=20)
             sched.wait_for_timeout(200)
-            return hh, mm, False
-        print(f"[time] 直接赋值输入框未生效（{res}），回退列表点击")
+            hv = hIn.input_value()
+            mv = mIn.input_value()
+            if hv == f"{hh:02d}" and mv == f"{mm:02d}":
+                sched.keyboard.press("Escape")  # 关掉本选择器下拉
+                return hh, mm, False
+            print(f"[time] 真实键盘设置时间未生效（h={hv} m={mv}），回退列表点击")
     except Exception as e:
-        print(f"[time] 直接赋值输入框异常，回退列表点击: {e}")
-    # 3) 回退：列表精确点击（必要时就近取整）
-    h, m, snapped = _pick_closest_time(sched, picker_loc, hh, mm)
-    sched.wait_for_timeout(300)
-    return h, m, snapped
+        print(f"[time] 真实键盘设置时间异常，回退列表点击: {e}")
+    # 3) 回退：点击下拉列表项（列表仅有步进档位，必要时就近取整）
+    try:
+        h, m, snapped = _pick_closest_time(sched, picker_loc, hh, mm)
+        sched.wait_for_timeout(200)
+        sched.keyboard.press("Escape")  # 关掉下拉
+        if not snapped:
+            return hh, mm, False
+        print(f"[time] 列表无精确档位，已就近取整 {hh}:{mm}→{h}:{m}")
+        return h, m, True
+    except Exception as e:
+        print(f"[time] 列表点击设置时间也失败: {e}")
+    return hh, mm, False
 
 
 def _set_time(sched, start_ts, end_ts, on_progress=None):
@@ -424,6 +493,8 @@ def _set_time(sched, start_ts, end_ts, on_progress=None):
     end_picker = sched.locator(".end .custom-time-picker").first
     if start_picker.count() > 0 and end_picker.count() > 0:
         snapped = []
+        # 先设开始、后设结束：设开始时没有任何下拉遮挡，开始输入框可干净点击落定；
+        # 结束最后设，其下拉开着也无妨（值已提交进 state）。
         h, m, snap = _set_time_picker(sched, start_picker, s_hh, s_mm)
         if snap:
             snapped.append(f"{s_hh}:{s_mm}→{h}:{m}")
@@ -442,6 +513,23 @@ def _set_time(sched, start_ts, end_ts, on_progress=None):
             if snapped:
                 msg += "（部分分钟已就近取整到可选档位）"
             on_progress(2, msg)
+
+
+def _close_playwright_nonblocking(p, ctx):
+    """非阻塞关闭浏览器：受限沙箱里 ctx.close() 可能挂死（浏览器进程不退），
+    故放到守护线程里带超时关掉；主线程不等待，直接返回结果，由 with 块退出时的
+    p.stop() 强制杀掉驱动进程回收残留（p.stop 杀进程通常很快，不挂）。"""
+    import threading
+
+    def _do():
+        try:
+            ctx.close()
+        except Exception:
+            pass
+
+    t = threading.Thread(target=_do, daemon=True)
+    t.start()
+    t.join(timeout=5)  # 最多等 5 秒；超时则放弃，绝不阻塞主线程
 
 
 def _scrape_result(page):
@@ -488,8 +576,6 @@ def create_meeting(userid, subject, start_ts, end_ts, host_key="", headless=True
         sched = _open_scheduler(ctx, page)
         if on_progress:
             on_progress(1, PROGRESS_STEPS[1])
-        # ---- 会议时间 ----
-        _set_time(sched, start_ts, end_ts, on_progress=on_progress)
 
         # ---- 取消勾选「允许成员在主持人进会前加入会议」（默认勾选，需主动关掉）----
         try:
@@ -568,18 +654,35 @@ def create_meeting(userid, subject, start_ts, end_ts, host_key="", headless=True
                 f"会议主题填写失败（实际值={cur!r}），主题输入框占位符/结构可能已变，请运行 --inspect 校准"
             )
 
+        # ---- 会议时间（放在最后填！取消勾选/密钥/主题交互会触发 React 重渲染，
+        #      把已写入 state 的时间值冲掉；故时间必须最后落定、提交前不再有任何交互）----
+        if on_progress:
+            on_progress(2, PROGRESS_STEPS[2])
+        _set_time(sched, start_ts, end_ts, on_progress=on_progress)
+
         # ---- 提交：「预定会议」按钮（精确 class 定位 button.meeting-button-area-confirm）----
         if on_progress:
             on_progress(5, PROGRESS_STEPS[5])
         submit_sel = "button.meeting-button-area-confirm"
+        # 先点一下主题输入框做 blur，确保时间/下拉的 state 已提交；再滚动按钮入视图非 force 点击
+        try:
+            sched.locator('input[placeholder="请输入会议名称"]').first.click(timeout=3000)
+            sched.wait_for_timeout(150)
+        except Exception:
+            pass
         btn = sched.query_selector(submit_sel)
         clicked = False
         if btn is not None:
-            try:
-                btn.click(force=True, timeout=8000)
-                clicked = True
-            except Exception as e:
-                print(f"[warn] 按 class 点击提交按钮失败，改用文字点击兜底: {e}")
+            for _attempt in range(3):
+                try:
+                    btn.scroll_into_view_if_needed(timeout=3000)
+                    sched.wait_for_timeout(200)
+                    btn.click(timeout=8000)  # 非 force：自动滚动+可达性校验，真实命中按钮
+                    clicked = True
+                    break
+                except Exception as e:
+                    print(f"[warn] 第 {_attempt+1} 次点击提交按钮失败: {e}")
+                    sched.wait_for_timeout(500)
         if not clicked:
             if not _js_click(sched, "预定会议"):
                 raise RuntimeError("未找到「预定会议」提交按钮，请贴出 inspect 截图")
@@ -590,8 +693,44 @@ def create_meeting(userid, subject, start_ts, end_ts, host_key="", headless=True
         # 若仍出现（竞态 / REST 未预检），【不要】强行「仍然预定」去创建重叠会议，
         # 而是干净上报「时段冲突」，避免生成重复会议（与「先查已有会议避免冲突」的诉求一致）。
         sched.wait_for_timeout(2000)
-        conflict_btn = sched.get_by_text("仍然预定", exact=False).first
-        if conflict_btn.count() > 0:
+        # 注意：腾讯会议的「仍然预定」按钮作为弹窗模板常驻 DOM（隐藏态），
+        # get_by_text 会把它也算进去 → 永远误判冲突。必须检查【真实可见性】
+        # （包围盒 >0 且 display/visibility/opacity 均可见），与本项目「校验须看可见性」一致。
+        conflict_diag = sched.evaluate(
+            """() => {
+                const els = [...document.querySelectorAll('button,a,span,div,li')];
+                const out = [];
+                for (const e of els) {
+                    const t = (e.textContent || '').trim();
+                    if (t.includes('仍然预定')) {
+                        const r = e.getBoundingClientRect();
+                        const cs = getComputedStyle(e);
+                        const parent = e.closest('[class*="modal"],[class*="dialog"],[class*="popup"],[class*="overlay"]') || e.parentElement;
+                        const pcs = parent ? getComputedStyle(parent) : null;
+                        out.push({
+                            text: t,
+                            rect: [Math.round(r.width), Math.round(r.height)],
+                            offsetParent: e.offsetParent !== null,
+                            display: cs.display, visibility: cs.visibility, opacity: cs.opacity,
+                            parentDisplay: pcs ? pcs.display : null,
+                            parentVisibility: pcs ? pcs.visibility : null,
+                            parentOpacity: pcs ? pcs.opacity : null,
+                        });
+                    }
+                }
+                return out;
+            }"""
+        )
+        print(f"[conflict] 诊断: {conflict_diag}")
+        has_conflict = any(
+            d["rect"][0] > 0 and d["rect"][1] > 0
+            and d["display"] != "none" and d["visibility"] != "hidden" and float(d["opacity"]) > 0
+            and (d["parentDisplay"] is None or d["parentDisplay"] != "none")
+            and (d["parentVisibility"] is None or d["parentVisibility"] != "hidden")
+            and (d["parentOpacity"] is None or float(d["parentOpacity"]) > 0)
+            for d in conflict_diag
+        )
+        if has_conflict:
             subj = ""
             try:
                 subj = sched.evaluate(
@@ -672,6 +811,39 @@ def create_meeting(userid, subject, start_ts, end_ts, host_key="", headless=True
                         info.append(f"  🔍 字段值: {fields}")
                 except Exception:
                     pass
+                # 诊断：提交按钮是否被遮挡 / 页面有无校验错误文本
+                try:
+                    diag = sched.evaluate(
+                        """() => {
+                            const out = {};
+                            const btn = document.querySelector('button.meeting-button-area-confirm');
+                            if (btn) {
+                                const r = btn.getBoundingClientRect();
+                                const cx = r.left + r.width/2, cy = r.top + r.height/2;
+                                const top = document.elementFromPoint(cx, cy);
+                                out.btnRect = [Math.round(r.width), Math.round(r.height)];
+                                out.topAtBtn = top ? (top.tagName + '.' + (top.className||'').toString().slice(0,40)) : 'null';
+                                out.btnIsTop = (top === btn) || (btn.contains(top));
+                                out.btnDisabled = btn.disabled;
+                            } else {
+                                out.btn = 'missing';
+                            }
+                            // 扫描可见的错误/提示文本
+                            const errs = [];
+                            const walk = (el) => {
+                                if (el.children.length === 0) {
+                                    const t = (el.textContent||'').trim();
+                                    if (t && (el.offsetParent !== null)) errs.push(t.slice(0,60));
+                                } else { for (const c of el.children) walk(c); }
+                            };
+                            walk(document.body);
+                            out.visibleTexts = errs.filter(t => /(错误|不能|早于|晚于|冲突|必填|请|无效|格式)/.test(t)).slice(0,8);
+                            return JSON.stringify(out);
+                        }"""
+                    )
+                    info.append(f"  🔧 诊断: {diag}")
+                except Exception as e:
+                    info.append(f"  🔧 诊断失败: {e}")
                 raise RuntimeError(
                     "点击「预定会议」后仍停留在表单页，疑似被校验拦截。\n各标签状态：\n"
                     + "\n".join(info)
@@ -680,10 +852,8 @@ def create_meeting(userid, subject, start_ts, end_ts, host_key="", headless=True
             # → 交由上层用 REST 反查会议号/链接，避免重复建会
             print("[create] 表单已提交，结果页未抓取，将交由上层 REST 反查会议号")
         save_state(ctx, userid)  # 续期登录态
-        try:
-            ctx.close()
-        except Exception:
-            pass
+        # 非阻塞关闭（沙箱里 ctx.close 可能挂死，绝不阻塞返回结果）
+        _close_playwright_nonblocking(p, ctx)
     return {"ok": True, "code": code, "url": url, "host_key": host_key}
 
 
