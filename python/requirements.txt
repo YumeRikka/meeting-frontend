@@ -1,0 +1,3 @@
+wxauto4
+requests
+python-dotenv

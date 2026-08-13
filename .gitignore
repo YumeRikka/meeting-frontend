@@ -1,0 +1,29 @@
+# 密钥与凭证（切勿提交）
+python/accounts.json
+python/.env
+.env
+deploy/config/
+deploy/data/
+
+# 浏览器登录态
+python/profiles/
+python/cookies/
+
+# 临时 / 调试文件
+**/__pycache__/
+*.db
+**/inspect_*
+**/smoke_*
+python/imp_err.txt
+python/smoke_out.txt
+python/wxauto_logs/
+python/cookies/
+.venv/
+venv/
+
+# 系统 / 编辑器
+.workbuddy/
+.DS_Store
+.venv/
+__pycache__/
+*.pyc

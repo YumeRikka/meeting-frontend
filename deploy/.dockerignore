@@ -1,0 +1,14 @@
+.git
+.workbuddy
+**/__pycache__
+python/profiles
+python/accounts.json
+python/.env
+python/cookies
+python/*.db
+h5/*.db
+**/inspect_*
+**/smoke_*
+**/test_*
+python/imp_err.txt
+python/smoke_out.txt

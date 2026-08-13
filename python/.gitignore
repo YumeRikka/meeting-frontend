@@ -1,0 +1,15 @@
+# 凭证与密钥（切勿提交）
+.env
+.env.example.bak
+accounts.json
+cookies/
+profiles/
+
+# Python
+__pycache__/
+*.pyc
+
+# 检查模式导出的临时文件（可能含个人信息）
+inspect_*.png
+inspect_*.html
+inspect_*.txt

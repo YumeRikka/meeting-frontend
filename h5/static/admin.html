@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>卡密管理</title>
+<style>
+  :root { --brand:#07c160; --bg:#f2f3f5; --card:#fff; --text:#1f1f1f; --muted:#888; --danger:#fa5151; --line:#e7e7e7; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--text); }
+  .wrap { max-width:560px; margin:0 auto; padding:20px; }
+  .card { background:var(--card); border-radius:12px; padding:18px; margin-bottom:16px; box-shadow:0 1px 4px rgba(0,0,0,.05); }
+  h1 { font-size:18px; margin:0 0 14px; }
+  label { display:block; font-size:13px; color:var(--muted); margin:12px 0 6px; }
+  input { width:100%; padding:11px 12px; font-size:15px; border:1px solid var(--line); border-radius:9px; background:#fafafa; outline:none; }
+  input:focus { border-color:var(--brand); background:#fff; }
+  button { width:100%; padding:13px; font-size:16px; color:#fff; background:var(--brand); border:none; border-radius:9px; margin-top:16px; font-weight:600; }
+  button:active { opacity:.85; }
+  .info { font-size:13px; color:var(--muted); margin-top:12px; line-height:1.7; white-space:pre-wrap; word-break:break-all; }
+  .ok { color:var(--brand); }
+  .bad { color:var(--danger); }
+  table { width:100%; border-collapse:collapse; font-size:13px; margin-top:10px; }
+  th, td { border:1px solid var(--line); padding:6px 8px; text-align:left; }
+  th { background:#fafafa; color:var(--muted); font-weight:500; }
+  .codes { font-family:monospace; font-size:14px; line-height:1.8; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>生成卡密</h1>
+    <label>管理员令牌（ADMIN_TOKEN）</label>
+    <input id="token" type="password" placeholder="在 .env 中配置的 ADMIN_TOKEN" />
+    <label>生成数量</label>
+    <input id="count" type="number" min="1" value="5" />
+    <label>每张可用次数（额度）</label>
+    <input id="quota" type="number" min="1" value="1" />
+    <label>有效期（天，留空=长期）</label>
+    <input id="days" type="number" min="1" placeholder="如 30" />
+    <label>备注（可选）</label>
+    <input id="note" placeholder="如：客户A-医学研讨会" />
+    <label>单次最长（分钟，默认 180=3 小时）</label>
+    <input id="max_dur" type="number" min="1" placeholder="180" />
+    <button id="btn-gen">生成</button>
+    <div class="info" id="gen-info"></div>
+  </div>
+
+  <div class="card hidden" id="list-card">
+    <h1>已生成卡密</h1>
+    <div class="codes" id="codes-box"></div>
+    <button class="ghost" id="btn-copy" style="background:#fff;color:var(--brand);border:1px solid var(--brand);">复制全部</button>
+  </div>
+
+  <div class="card">
+    <h1>全部卡密</h1>
+    <button id="btn-list">刷新列表</button>
+    <div id="all-list"></div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const api = (path, body, isGet) => fetch(path, {
+  method: isGet ? "GET" : "POST",
+  headers: { "Content-Type": "application/json" },
+  body: isGet ? undefined : JSON.stringify(body),
+}).then(r => r.json().then(d => ({ status: r.status, data: d })));
+
+$("btn-gen").onclick = async () => {
+  const token = $("token").value.trim();
+  const count = parseInt($("count").value, 10);
+  const quota = parseInt($("quota").value, 10);
+  const days = $("days").value.trim() ? parseInt($("days").value, 10) : "";
+  const note = $("note").value.trim();
+  const maxDur = $("max_dur").value.trim() ? parseInt($("max_dur").value, 10) : "";
+  if (!token) { $("gen-info").innerHTML = `<span class="bad">请填写管理员令牌</span>`; return; }
+  $("gen-info").innerHTML = "生成中…";
+  const { data } = await api("/api/admin/cards", { token, count, quota, days, note, max_duration_min: maxDur });
+  if (!data.ok) {
+    const msg = { forbidden:"令牌错误", invalid_params:"参数错误" }[data.reason] || "生成失败";
+    $("gen-info").innerHTML = `<span class="bad">${msg}</span>`;
+    return;
+  }
+  $("gen-info").innerHTML = `<span class="ok">已生成 ${data.codes.length} 张卡密</span>`;
+  $("codes-box").textContent = data.codes.join("\n");
+  $("list-card").classList.remove("hidden");
+  loadList();
+};
+
+$("btn-copy").onclick = () => {
+  if (navigator.clipboard) navigator.clipboard.writeText($("codes-box").textContent);
+  $("btn-copy").textContent = "已复制 ✓";
+  setTimeout(() => $("btn-copy").textContent = "复制全部", 1500);
+};
+
+async function loadList() {
+  const token = $("token").value.trim();
+  if (!token) return;
+  const { data } = await api("/api/admin/cards?token=" + encodeURIComponent(token), null, true);
+  if (!data.ok) return;
+  if (!data.cards.length) { $("all-list").innerHTML = `<div class="info">暂无卡密</div>`; return; }
+  const rows = data.cards.map(c => {
+    const exp = c.expires_at ? new Date(c.expires_at * 1000).toLocaleDateString() : "长期";
+    const state = c.disabled ? "停用" : (c.expires_at && c.expires_at * 1000 < Date.now() ? "过期" : "有效");
+    const maxH = c.max_duration_min ? Math.floor(c.max_duration_min / 60) : 3;
+    return `<tr><td>${c.code}</td><td>${c.used}/${c.quota}</td><td>${exp}</td><td>${maxH}h</td><td>${state}</td><td>${c.note||""}</td></tr>`;
+  }).join("");
+  $("all-list").innerHTML = `<table><tr><th>卡密</th><th>已用/总</th><th>有效期</th><th>单次最长</th><th>状态</th><th>备注</th></tr>${rows}</table>`;
+}
+$("btn-list").onclick = loadList;
+</script>
+</body>
+</html>

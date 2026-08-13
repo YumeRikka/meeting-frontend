@@ -1,0 +1,24 @@
+# 运行时服务（无头建会，常驻）
+services:
+  meeting-bot:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: meeting-bot:local
+    container_name: meeting-bot
+    restart: unless-stopped
+    ports:
+      - "5000:5000"            # Flask 后端
+    environment:
+      - PORT=5000
+      - CARDS_DB=/app/data/cards.db
+      - DISPLAY=:99
+    volumes:
+      # 凭证（从你本机 python/accounts.json、python/.env 拷过来，见 README）
+      - ./config/accounts.json:/app/python/accounts.json:ro
+      - ./config/.env:/app/python/.env:ro
+      # 持久化数据（登录态、卡密库）—— 重启不丢
+      - ./data/profiles:/app/python/profiles
+      - ./data:/app/data
+    shm_size: "256mb"
+    command: ["python", "/app/h5/app.py"]

@@ -1,0 +1,22 @@
+# 一次性登录：带虚拟桌面(noVNC)，在浏览器里完成 5 个腾讯会议账号的扫码/输密码登录
+# 登录态写入 ./data/profiles，之后运行时容器复用，无需再登录
+services:
+  meeting-bot-login:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: meeting-bot:local
+    container_name: meeting-bot-login
+    restart: "no"
+    ports:
+      - "6080:6080"            # noVNC 网页虚拟桌面
+    environment:
+      - CARDS_DB=/app/data/cards.db
+      - DISPLAY=:99
+    volumes:
+      - ./config/accounts.json:/app/python/accounts.json:ro
+      - ./config/.env:/app/python/.env:ro
+      - ./data/profiles:/app/python/profiles
+      - ./data:/app/data
+    shm_size: "256mb"
+    command: ["/app/login.sh"]

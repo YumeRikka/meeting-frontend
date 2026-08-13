@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>会议创建</title>
+<script src="config.js"></script>
+<style>
+  :root { --brand:#07c160; --bg:#f2f3f5; --card:#fff; --text:#1f1f1f; --muted:#888; --danger:#fa5151; --line:#e7e7e7; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin:0; font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--text); }
+  .wrap { max-width:480px; margin:0 auto; padding:16px; }
+  .card { background:var(--card); border-radius:12px; padding:16px; margin-bottom:14px; box-shadow:0 1px 4px rgba(0,0,0,.05); }
+  h1 { font-size:18px; margin:4px 0 12px; }
+  label { display:block; font-size:13px; color:var(--muted); margin:12px 0 6px; }
+  input, select { width:100%; padding:11px 12px; font-size:15px; border:1px solid var(--line); border-radius:9px; background:#fafafa; outline:none; }
+  input:focus { border-color:var(--brand); background:#fff; }
+  button { width:100%; padding:13px; font-size:16px; color:#fff; background:var(--brand); border:none; border-radius:9px; margin-top:16px; font-weight:600; }
+  button.ghost { background:#fff; color:var(--brand); border:1px solid var(--brand); }
+  button:active { opacity:.85; }
+  .info { font-size:13px; color:var(--muted); margin-top:10px; line-height:1.6; }
+  .info b { color:var(--text); }
+  .ok { color:var(--brand); }
+  .bad { color:var(--danger); }
+  .tabs { display:flex; gap:8px; margin-bottom:14px; }
+  .tab { flex:1; text-align:center; padding:10px; border-radius:9px; background:#fff; font-size:14px; color:var(--muted); border:1px solid var(--line); }
+  .tab.active { color:var(--brand); border-color:var(--brand); font-weight:600; }
+  .panel { display:none; }
+  .panel.active { display:block; }
+  .invite { background:#fff; border:1px solid var(--line); border-radius:10px; padding:14px; font-size:15px; line-height:1.9; white-space:pre-wrap; word-break:break-all; }
+  .invite .acc { color:var(--brand); font-weight:600; }
+  .hidden { display:none; }
+  .copy { margin-top:10px; }
+
+  /* 时间选择触发框（只读，点击弹出滚轮） */
+  .time-field { display:flex; align-items:center; justify-content:space-between; width:100%; padding:11px 12px; font-size:15px;
+    border:1px solid var(--line); border-radius:9px; background:#fafafa; color:var(--text); cursor:pointer; }
+  .time-field.empty { color:var(--muted); }
+  .time-field .caret { color:var(--muted); font-size:13px; }
+  .time-field:active { background:#f0f0f0; }
+
+  /* 底部抽屉滚轮选择器 */
+  .sheet-mask { position:fixed; inset:0; background:rgba(0,0,0,.45); display:none; z-index:50; }
+  .sheet-mask.show { display:block; }
+  .sheet { position:fixed; left:0; right:0; bottom:0; z-index:51; background:#fff; border-radius:16px 16px 0 0;
+    transform:translateY(100%); transition:transform .28s cubic-bezier(.22,.61,.36,1); max-width:480px; margin:0 auto; }
+  .sheet-mask.show .sheet { transform:translateY(0); }
+  .sheet-head { display:flex; align-items:center; justify-content:space-between; padding:14px 16px 6px; }
+  .sheet-head .title { font-size:15px; font-weight:600; }
+  .sheet-head button { width:auto; margin:0; padding:6px 10px; font-size:15px; background:none; font-weight:600; }
+  .sheet-head .cancel { color:var(--muted); }
+  .sheet-head .confirm { color:var(--brand); }
+  .sheet-preview { text-align:center; font-size:16px; font-weight:600; color:var(--brand); padding:4px 0 10px; }
+  .wheel-headers { display:flex; padding:0 16px; }
+  .wheel-headers span { flex:1; text-align:center; font-size:12px; color:var(--muted); }
+  .wheels { display:flex; padding:0 16px 16px; position:relative; }
+  .wheel { flex:1; height:200px; overflow-y:auto; scroll-snap-type:y mandatory; position:relative; -webkit-overflow-scrolling:touch; }
+  .wheel-item { height:40px; line-height:40px; text-align:center; font-size:17px; color:var(--muted); scroll-snap-align:center; }
+  .wheel-item.sel { color:var(--text); font-weight:700; font-size:19px; }
+  /* 选中高亮带 */
+  .wheel-center { position:absolute; left:16px; right:16px; top:80px; height:40px; border-top:1px solid var(--line);
+    border-bottom:1px solid var(--line); background:rgba(7,193,96,.06); pointer-events:none; }
+  /* 上下渐隐遮罩 */
+  .wheel-fade { position:absolute; left:16px; right:16px; height:80px; pointer-events:none; }
+  .wheel-fade.top { top:0; background:linear-gradient(#fff,rgba(255,255,255,0)); }
+  .wheel-fade.bot { bottom:0; height:80px; background:linear-gradient(rgba(255,255,255,0),#fff); }
+
+  /* 创建中进度遮罩 */
+  .prog-mask { position:fixed; inset:0; background:rgba(0,0,0,.5); display:none; z-index:60; align-items:center; justify-content:center; }
+  .prog-mask.show { display:flex; }
+  .prog-box { width:80%; max-width:320px; background:#fff; border-radius:14px; padding:22px 20px; text-align:center; }
+  .prog-spinner { width:34px; height:34px; border:3px solid #e6e6e6; border-top-color:var(--brand); border-radius:50%;
+    margin:0 auto 14px; animation:spin .8s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .prog-title { font-size:15px; font-weight:600; margin-bottom:4px; }
+  .prog-step { font-size:13px; color:var(--muted); min-height:18px; margin-bottom:14px; }
+  .prog-bar { height:8px; background:#eee; border-radius:6px; overflow:hidden; }
+  .prog-bar > i { display:block; height:100%; width:0; background:var(--brand); border-radius:6px; transition:width .35s ease; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="tabs">
+    <div class="tab active" data-tab="create">创建会议</div>
+    <div class="tab" data-tab="cancel">取消会议</div>
+  </div>
+
+  <!-- 创建 -->
+  <div class="panel active" id="panel-create">
+    <div class="card">
+      <h1>① 输入卡密</h1>
+      <input id="card" placeholder="卡密，如 ABCD-EFGH-JKLM" autocomplete="off" />
+      <button class="ghost" id="btn-verify">验证卡密</button>
+      <div class="info" id="card-info"></div>
+    </div>
+
+    <div class="card hidden" id="create-form">
+      <h1>② 填写会议</h1>
+      <label>会议主题</label>
+      <input id="subject" placeholder="如：2026年医学英语研讨会" />
+      <label>会议开始时间</label>
+      <div class="time-field empty" id="start"><span class="ph">请选择开始时间</span><span class="caret">▾</span></div>
+      <label>会议结束时间</label>
+      <div class="time-field empty" id="end"><span class="ph">请选择结束时间</span><span class="caret">▾</span></div>
+      <button id="btn-create">创建会议</button>
+      <div class="info" id="create-info"></div>
+    </div>
+
+    <div class="card hidden" id="create-result">
+      <h1>会议创建成功</h1>
+      <div class="invite" id="invite-box"></div>
+      <button class="ghost copy" id="btn-copy">复制邀请信息</button>
+    </div>
+  </div>
+
+  <!-- 取消 -->
+  <div class="panel" id="panel-cancel">
+    <div class="card">
+      <h1>取消会议</h1>
+      <label>卡密</label>
+      <input id="c-card" placeholder="你的卡密" autocomplete="off" />
+      <label>会议号（9 位）</label>
+      <input id="c-code" placeholder="如 662-505-003" autocomplete="off" />
+      <button id="btn-cancel">取消会议</button>
+      <div class="info" id="cancel-info"></div>
+    </div>
+  </div>
+</div>
+
+<!-- 时间滚轮选择器 -->
+<div class="sheet-mask" id="picker-sheet">
+  <div class="sheet">
+    <div class="sheet-head">
+      <button class="cancel" id="picker-cancel">取消</button>
+      <div class="title">选择时间</div>
+      <button class="confirm" id="picker-confirm">确定</button>
+    </div>
+    <div class="sheet-preview" id="picker-preview">—</div>
+    <div class="wheel-headers"><span>日期</span><span>时</span><span>分</span></div>
+    <div class="wheels">
+      <div class="wheel-center"></div>
+      <div class="wheel-fade top"></div>
+      <div class="wheel-fade bot"></div>
+      <div id="picker-wheels" style="display:flex; width:100%;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- 创建中进度 -->
+<div class="prog-mask" id="prog-mask">
+  <div class="prog-box">
+    <div class="prog-spinner"></div>
+    <div class="prog-title">创建会议中，请稍候…</div>
+    <div class="prog-step" id="prog-step">正在准备…</div>
+    <div class="prog-bar"><i id="prog-bar"></i></div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+// 后端 API 基地址：默认同源（本地/同域名部署）。
+// 部署到 GitHub Pages 等独立前端时，在同目录新建 config.js 写入：
+//   window.API_BASE = "https://api.yourdomain.com";
+const API_BASE = (window.API_BASE || "").replace(/\/+$/, "");
+const api = (path, body) => fetch(API_BASE + path, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(body),
+}).then(r => r.json().then(d => ({ status: r.status, data: d })));
+
+const WHEEL_H = 40, VISIBLE = 5, PAD = (VISIBLE - 1) / 2 * WHEEL_H;
+const WK = ["周日","周一","周二","周三","周四","周五","周六"];
+const range = (n) => Array.from({ length: n }, (_, i) => i);
+
+let startTs = 0, endTs = 0, currentCard = "";
+
+// ---------- 工具 ----------
+function pad2(n){ return String(n).padStart(2, "0"); }
+function fmtDateLabel(dt){ return `${dt.getMonth()+1}月${dt.getDate()}日 ${WK[dt.getDay()]}`; }
+function fmtField(ts){ const d=new Date(ts*1000); return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`; }
+function defaultStart(){ return Math.floor(Date.now()/1000/60)*60 + 60; }   // 下一分钟
+
+function fmtInvite(inv) {
+  const d = new Date(inv.start * 1000);
+  const end = new Date((inv.start + inv.duration * 60) * 1000);
+  const date = `${d.getFullYear()}/${pad2(d.getMonth()+1)}/${pad2(d.getDate())}`;
+  const t1 = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  const t2 = `${pad2(end.getHours())}:${pad2(end.getMinutes())}`;
+  const code = inv.code.replace(/\D/g, "").padStart(9, "0").replace(/(\d{3})(\d{3})(\d{3})/, "$1-$2-$3");
+  return `${inv.account} 邀请您参加腾讯会议\n会议主题：${inv.subject}\n会议时间：${date} ${t1}-${t2}\n入会链接：${inv.url}\n会议号：${code}`;
+}
+
+// ---------- 滚轮时间选择器 ----------
+function openPicker(initialTs, cb) {
+  const dates = [];
+  const base = new Date(); base.setHours(0,0,0,0);
+  for (let i = 0; i <= 60; i++) { const dt = new Date(base); dt.setDate(base.getDate()+i); dates.push(dt); }
+  const init = new Date(initialTs * 1000);
+  let di = dates.findIndex(dt => dt.getDate()===init.getDate() && dt.getMonth()===init.getMonth() && dt.getFullYear()===init.getFullYear());
+  if (di < 0) di = 0;
+  const cols = [
+    { key:"d", items: dates.map(dt => fmtDateLabel(dt)), init: di },
+    { key:"h", items: range(24).map(h => pad2(h)), init: init.getHours() },
+    { key:"m", items: range(60).map(m => pad2(m)), init: init.getMinutes() },
+  ];
+  const state = { d: di, h: init.getHours(), m: init.getMinutes() };
+  const wheels = $("picker-wheels");
+  wheels.innerHTML = "";
+
+  function updatePreview() {
+    const dt = new Date(dates[state.d]); dt.setHours(state.h, state.m, 0, 0);
+    $("picker-preview").textContent = `${dt.getFullYear()}年${dt.getMonth()+1}月${dt.getDate()}日 ${WK[dt.getDay()]} ${pad2(state.h)}:${pad2(state.m)}`;
+  }
+
+  cols.forEach(col => {
+    const w = document.createElement("div");
+    w.className = "wheel";
+    const top = document.createElement("div"); top.style.height = PAD + "px"; w.appendChild(top);
+    col.items.forEach((label, idx) => {
+      const it = document.createElement("div");
+      it.className = "wheel-item" + (idx === col.init ? " sel" : "");
+      it.textContent = label; it.dataset.idx = idx;
+      w.appendChild(it);
+    });
+    const bot = document.createElement("div"); bot.style.height = PAD + "px"; w.appendChild(bot);
+    wheels.appendChild(w);
+    w.scrollTop = col.init * WHEEL_H;
+    w.addEventListener("scroll", () => {
+      requestAnimationFrame(() => {
+        const idx = Math.max(0, Math.min(col.items.length - 1, Math.round(w.scrollTop / WHEEL_H)));
+        state[col.key] = idx;
+        w.querySelectorAll(".wheel-item").forEach(el => el.classList.toggle("sel", parseInt(el.dataset.idx) === idx));
+        updatePreview();
+      });
+    });
+  });
+  updatePreview();
+
+  $("picker-confirm").onclick = () => {
+    const dt = new Date(dates[state.d]); dt.setHours(state.h, state.m, 0, 0);
+    const ts = Math.floor(dt.getTime() / 1000);
+    hidePicker();
+    cb(ts);
+  };
+  $("picker-cancel").onclick = hidePicker;
+  $("picker-sheet").classList.add("show");
+}
+function hidePicker(){ $("picker-sheet").classList.remove("show"); }
+
+// 触发框
+$("start").onclick = () => openPicker(startTs || defaultStart(), (ts) => {
+  startTs = ts;
+  $("start").classList.remove("empty");
+  $("start").querySelector(".ph").textContent = fmtField(ts);
+  // 结束时间未选或早于开始 → 自动顺延 3 小时
+  if (!endTs || endTs <= startTs) {
+    endTs = startTs + 10800;
+    $("end").classList.remove("empty");
+    $("end").querySelector(".ph").textContent = fmtField(endTs);
+  }
+});
+$("end").onclick = () => openPicker(endTs || (startTs ? startTs + 10800 : defaultStart() + 10800), (ts) => {
+  endTs = ts;
+  $("end").classList.remove("empty");
+  $("end").querySelector(".ph").textContent = fmtField(ts);
+});
+
+// ---------- Tab 切换 ----------
+document.querySelectorAll(".tab").forEach(t => t.onclick = () => {
+  document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+  document.querySelectorAll(".panel").forEach(x => x.classList.remove("active"));
+  t.classList.add("active");
+  $("panel-" + t.dataset.tab).classList.add("active");
+});
+
+// ---------- 卡密校验 ----------
+$("btn-verify").onclick = async () => {
+  const code = $("card").value.trim().toUpperCase();
+  if (!code) { $("card-info").innerHTML = `<span class="bad">请输入卡密</span>`; return; }
+  const { data } = await api("/api/card/verify", { code });
+  if (!data.ok) {
+    const msg = { not_found:"卡密不存在", disabled:"卡密已停用", expired:"卡密已过期", no_quota:"卡密次数已用完" }[data.reason] || "验证失败";
+    $("card-info").innerHTML = `<span class="bad">${msg}</span>`;
+    $("create-form").classList.add("hidden");
+    return;
+  }
+  currentCard = code;
+  const exp = data.expires_at ? new Date(data.expires_at * 1000).toLocaleDateString() : "长期有效";
+  const maxMin = data.max_duration_min || 180;
+  const maxH = Math.floor(maxMin / 60);
+  $("card-info").innerHTML = `<span class="ok">卡密有效</span><br>剩余次数：<b>${data.remaining}</b> / ${data.quota}　有效期至：<b>${exp}</b><br>单次最长：<b>${maxH} 小时</b>`;
+  // 预填默认时间
+  startTs = defaultStart();
+  endTs = startTs + 10800;
+  $("start").classList.remove("empty"); $("start").querySelector(".ph").textContent = fmtField(startTs);
+  $("end").classList.remove("empty"); $("end").querySelector(".ph").textContent = fmtField(endTs);
+  $("create-form").classList.remove("hidden");
+};
+
+// ---------- 创建会议（异步 + 进度条） ----------
+function showProgress(){ $("prog-mask").classList.add("show"); $("prog-bar").style.width = "0%"; $("prog-step").textContent = "正在准备…"; }
+function hideProgress(){ $("prog-mask").classList.remove("show"); }
+function setProgress(percent, message){
+  $("prog-bar").style.width = Math.max(0, Math.min(100, percent)) + "%";
+  if (message) $("prog-step").textContent = message;
+}
+
+$("btn-create").onclick = async () => {
+  const subject = $("subject").value.trim();
+  if (!subject || !startTs || !endTs) { $("create-info").innerHTML = `<span class="bad">请完整填写会议信息</span>`; return; }
+  if (endTs <= startTs) { $("create-info").innerHTML = `<span class="bad">结束时间需晚于开始时间</span>`; return; }
+  $("create-info").innerHTML = "";
+  // 1) 发起建会任务
+  let taskId = "";
+  const r1 = await api("/api/meeting/create", { code: currentCard, subject, start: startTs, end: endTs });
+  if (!r1.data.ok) {
+    const msg = { not_found:"卡密不存在", disabled:"卡密已停用", expired:"卡密已过期", no_quota:"卡密次数已用完",
+      invalid_params:"参数不完整", too_long: r1.data.detail || "会议时长超出上限" }[r1.data.reason] || "创建失败";
+    $("create-info").innerHTML = `<span class="bad">${msg}</span>`;
+    return;
+  }
+  taskId = r1.data.task_id;
+  // 2) 显示进度遮罩并轮询
+  showProgress();
+  const timer = setInterval(async () => {
+    let d;
+    try { const resp = await fetch(`${API_BASE}/api/meeting/progress?task=${taskId}`); d = await resp.json(); }
+    catch (e) { return; }
+    setProgress(d.percent || 0, d.message || "");
+    if (d.done) {
+      clearInterval(timer);
+      if (d.ok) {
+        setProgress(100, "创建完成");
+        hideProgress();
+        $("invite-box").textContent = fmtInvite(d.invite);
+        $("create-result").classList.remove("hidden");
+        $("create-result").scrollIntoView({ behavior: "smooth" });
+      } else {
+        hideProgress();
+        const err = d.error || {};
+        const msg = {
+          not_found:"卡密不存在", disabled:"卡密已停用", expired:"卡密已过期", no_quota:"卡密次数已用完",
+          invalid_params:"参数不完整", create_failed:"建会失败，请稍后重试", conflict:"该时段所有账号均有冲突",
+          too_long: err.detail || "会议时长超出上限"
+        }[err.reason] || "创建失败";
+        let extra = "";
+        if (err.reason === "conflict" && err.details) {
+          const lines = Object.entries(err.details).map(([name, info]) => {
+            if (info.error) return `• ${name}：查询失败`;
+            if (!info.conflicts || !info.conflicts.length) return `• ${name}：无冲突（但未被选中，请检查）`;
+            const c = info.conflicts.map(m => `${m.subject}（${m.start_time}–${m.end_time}）`).join("；");
+            return `• ${name}：${c}`;
+          });
+          extra = `<br><span class="bad">前后各 ${Math.round((err.buffer||1800)/60)} 分钟缓冲冲突：</span><br>${lines.join("<br>")}`;
+        }
+        if (err.detail) extra += `<br><span class="bad">${err.detail}</span>`;
+        $("create-info").innerHTML = `<span class="bad">${msg}</span>${extra}`;
+      }
+    }
+  }, 700);
+};
+
+$("btn-copy").onclick = () => {
+  const text = $("invite-box").textContent;
+  if (navigator.clipboard) navigator.clipboard.writeText(text);
+  $("btn-copy").textContent = "已复制 ✓";
+  setTimeout(() => $("btn-copy").textContent = "复制邀请信息", 1500);
+};
+
+// ---------- 取消会议 ----------
+$("btn-cancel").onclick = async () => {
+  const code = $("c-card").value.trim().toUpperCase();
+  const meetingCode = $("c-code").value.trim();
+  if (!code || !meetingCode) { $("cancel-info").innerHTML = `<span class="bad">请填写卡密与会议号</span>`; return; }
+  $("cancel-info").innerHTML = "取消中…";
+  const { data } = await api("/api/meeting/cancel", { code, meeting_code: meetingCode });
+  if (!data.ok) {
+    const msg = {
+      not_found:"卡密不存在", disabled:"卡密已停用", expired:"卡密已过期",
+      invalid_params:"参数不完整", meeting_not_found:"未找到该会议",
+      query_failed:"查询失败", cancel_failed:"取消失败"
+    }[data.reason] || "取消失败";
+    $("cancel-info").innerHTML = `<span class="bad">${msg}</span>${data.detail ? `<br><span class="bad">${data.detail}</span>` : ""}`;
+    return;
+  }
+  $("cancel-info").innerHTML = `<span class="ok">已取消：${data.subject}</span>`;
+};
+</script>
+</body>
+</html>
