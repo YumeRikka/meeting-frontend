@@ -533,26 +533,64 @@ def _close_playwright_nonblocking(p, ctx):
 
 
 def _scrape_result(page):
-    """从创建成功弹窗里抓会议号 + 入会链接。"""
+    """从创建成功结果页里抓会议号 + 入会链接 + 主持人密钥。
+    返回 (code, url, host_key)。抓不到抛 RuntimeError（交由上层 REST 兜底）。
+    注意：结果页会议号带空格（如「598 521 134」），链接在 <span class="decrypt-text"> 而非 <a href>，
+    故用「按 label 定位字段 → 取 .decrypt-text/.met-form__text 文本 → 去非数字」的稳健方式解析。"""
     import re
-    page.wait_for_timeout(3000)  # 等成功弹窗渲染（无头模式可能稍慢）
-    txt = page.inner_text("body")
-    m = re.search(r"(?:会议号[：:\s]*|)\b(\d{9,11})\b", txt)
-    code = m.group(1) if m else ""
-    # 入会链接
-    url = ""
-    for a in page.query_selector_all("a[href]"):
-        href = a.get_attribute("href") or ""
-        if "meeting.tencent.com" in href and ("/dm/" in href or "/p/" in href):
-            url = href
-            break
+    try:
+        page.wait_for_selector("text=会议号", timeout=8000)  # 成功页才出现「会议号」字段
+    except Exception:
+        pass
+    page.wait_for_timeout(800)  # 给渲染兜底
+    data = page.evaluate(
+        """() => {
+            const getVal = (labelText) => {
+                const labels = [...document.querySelectorAll('label')];
+                for (const l of labels) {
+                    if ((l.textContent || '').trim().includes(labelText)) {
+                        const item = l.closest('.met-form__item') || l.closest('.form-item');
+                        if (!item) continue;
+                        const t = item.querySelector('.decrypt-text') || item.querySelector('.met-form__text');
+                        if (t) return (t.innerText || t.textContent || '').trim();
+                    }
+                }
+                const dt = document.querySelector('.decrypt-text');
+                return dt ? (dt.innerText || dt.textContent || '').trim() : '';
+            };
+            return {
+                codeRaw: getVal('会议号'),
+                linkRaw: getVal('会议链接'),
+                keyRaw: getVal('主持人密钥')
+            };
+        }"""
+    )
+    code_raw = data.get("codeRaw", "") or ""
+    code = re.sub(r"\D", "", code_raw)  # 「598 521 134」 -> 「598521134」
+    if not (9 <= len(code) <= 11):
+        code = ""
+    link_raw = data.get("linkRaw", "") or ""
+    m = re.search(r"https?://meeting\.tencent\.com/[^\s'\"<>]+", link_raw)
+    url = m.group(0) if m else ""
     if not url:
-        m2 = re.search(r"(https?://meeting\.tencent\.com/[^\s'\"<>]+)", txt)
-        url = m2.group(1) if m2 else ""
+        # 兜底：扫 <a href> 与页面全文
+        for a in page.query_selector_all("a[href]"):
+            href = a.get_attribute("href") or ""
+            if "meeting.tencent.com" in href and ("/dm/" in href or "/p/" in href):
+                url = href
+                break
+    if not url:
+        body = page.inner_text("body") or ""
+        m2 = re.search(r"https?://meeting\.tencent\.com/[^\s'\"<>]+", body)
+        url = m2.group(0) if m2 else ""
+    host_key = re.sub(r"\D", "", data.get("keyRaw", "") or "")
     if not code or not url:
         # 兜底：dump 一段页面文本方便校准
-        raise RuntimeError(f"已点击提交但未解析出会议号/链接。页面片段：\n{txt[:1000]}")
-    return code, url
+        raise RuntimeError(
+            f"已点击提交但未解析出会议号/链接。code_raw={code_raw!r} link_raw={link_raw!r} code={code!r} url={url!r}"
+        )
+    return code, url, host_key
+
 
 
 def create_meeting(userid, subject, start_ts, end_ts, host_key="", headless=True, on_progress=None):
@@ -750,11 +788,13 @@ def create_meeting(userid, subject, start_ts, end_ts, host_key="", headless=True
         candidates = [sched] + [pg for pg in ctx.pages if pg != sched]
         for pg in candidates:
             try:
-                c, u = _scrape_result(pg)
+                c, u, hk = _scrape_result(pg)
                 if c and u:
                     code, url = c, u
+                    print(f"[create] 结果页抓取成功：会议号={code} 链接={url}" + (f" 密钥={hk}" if hk else ""))
                     break
-            except Exception:
+            except Exception as e:
+                print(f"[create] 结果页抓取失败（{e}），尝试其它标签/REST 兜底")
                 continue
         if not (code and url):
             # 判断是「校验未通过（停在表单）」还是「已提交但结果页无头崩溃抓不到」
