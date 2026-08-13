@@ -537,32 +537,14 @@ def create_meeting(userid, subject, start_ts, end_ts, host_key="", headless=True
         sched.wait_for_selector(subj_sel, timeout=10000)
 
         def _fill_subject_robust(val):
+            # 腾讯 met-input 的 onChange 源码：H.current ? J(t) : x(t) ——只有在「非输入法合成中」
+            # (H.current=false) 时才会走 x(t) 真正把值提交到 React state。任何合成事件（compositionstart）
+            # 都会把 H.current 置 true，导致值只进临时变量 J(t)、不提交，提交时 state 仍空 → 「不能全为空格」。
+            # 因此这里用「真实键盘逐字输入」（不触发 composition，H.current 保持 false），让 onChange 走 x(t)。
             loc = sched.locator(subj_sel)
-            try:
-                loc.click(timeout=5000)
-                loc.fill("")
-                loc.press_sequentially(val, delay=25)
-            except Exception as e:
-                print(f"[warn] subject press_sequentially 失败，改用原生 setter 兜底: {e}")
-                try:
-                    sched.evaluate(
-                        """(args) => {
-                            const sel = args[0], v = args[1];
-                            const el = document.querySelector(sel);
-                            if (!el) return;
-                            const proto = Object.getPrototypeOf(el);
-                            const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
-                            setter.call(el, v);
-                            if (el._valueTracker) {
-                                try { el._valueTracker.setValue((el.value || '') + '\\u200b'); } catch (e2) {}
-                            }
-                            el.dispatchEvent(new Event('input', { bubbles: true }));
-                            el.dispatchEvent(new Event('change', { bubbles: true }));
-                        }""",
-                        [subj_sel, val],
-                    )
-                except Exception as e2:
-                    print(f"[warn] subject 原生 setter 兜底也失败: {e2}")
+            loc.click(timeout=5000)
+            sched.keyboard.press("Control+a")   # 全选（含腾讯预填的默认主题「预定的会议」）
+            sched.keyboard.type(val, delay=20)  # 真实逐字键入，逐个字符触发原生 input → React onChange → x(t)
             return sched.evaluate(
                 "(args) => { const el = document.querySelector(args[0]); return el ? el.value : ''; }",
                 [subj_sel],
@@ -570,15 +552,16 @@ def create_meeting(userid, subject, start_ts, end_ts, host_key="", headless=True
 
         cur = ""
         for _try in range(3):
-            cur = _fill_subject_robust(subject)
-            sched.wait_for_timeout(300)
+            res = _fill_subject_robust(subject)
+            sched.wait_for_timeout(500)
             cur = sched.evaluate(
                 "(args) => { const el = document.querySelector(args[0]); return el ? el.value : ''; }",
                 [subj_sel],
             )
+            print(f"[create] 主题回填结果={res!r} 当前值={cur!r}")
             if cur and cur.strip():
                 break
-            print(f"[warn] 主题第 {_try + 1} 次回填仍为空，重试…")
+            print(f"[warn] 主题第 {_try + 1} 次回填仍为空（React state 疑似未更新），重试…")
         print(f"[create] 主题实际值: {cur!r} (期望 {subject!r})")
         if not cur or not str(cur).strip():
             raise RuntimeError(
@@ -601,6 +584,25 @@ def create_meeting(userid, subject, start_ts, end_ts, host_key="", headless=True
             if not _js_click(sched, "预定会议"):
                 raise RuntimeError("未找到「预定会议」提交按钮，请贴出 inspect 截图")
         print("[create] 已点击「预定会议」，等待结果…")
+
+        # ---- 处理可能的「会议冲突提示」弹窗 ----
+        # 正常情况：REST 已预检并挑选无冲突账号，此弹窗不应出现。
+        # 若仍出现（竞态 / REST 未预检），【不要】强行「仍然预定」去创建重叠会议，
+        # 而是干净上报「时段冲突」，避免生成重复会议（与「先查已有会议避免冲突」的诉求一致）。
+        sched.wait_for_timeout(2000)
+        conflict_btn = sched.get_by_text("仍然预定", exact=False).first
+        if conflict_btn.count() > 0:
+            subj = ""
+            try:
+                subj = sched.evaluate(
+                    "() => { const e=document.querySelector('input[placeholder=\"请输入会议名称\"]'); return e ? e.value : ''; }"
+                ) or ""
+            except Exception:
+                subj = ""
+            raise RuntimeError(
+                f"时段冲突：账号 {userid} 在请求的会议时段已有会议（弹出「会议冲突提示」）。"
+                f"已跳过强行创建，避免生成重叠会议。请更换时间或账号后重试。主题={subj!r}"
+            )
 
         # ---- 抓取结果：在所有已打开标签里找会议号（成功弹窗可能新开标签）----
         if on_progress:
@@ -633,13 +635,17 @@ def create_meeting(userid, subject, start_ts, end_ts, host_key="", headless=True
                         t = pg.evaluate("() => document.body.innerText || ''")
                     except Exception:
                         t = ""
-                    # 抽取可能的校验错误文本
+                    # 抽取可能的校验错误文本（只读可见的，忽略静态隐藏的错误图标 title）
                     err = ""
                     try:
                         err = pg.evaluate(
-                            "() => { const e = document.querySelector("
-                            "'.ant-form-item-explain-error, [class*=\"error\"], [class*=\"Error\"]'); "
-                            "return e ? (e.innerText || '').trim() : ''; }"
+                            """() => {
+                                for (const tip of document.querySelectorAll('.tea-action-state__text')) {
+                                    const hidden = (tip.closest('.hide-error-tips') !== null) || (tip.offsetParent === null);
+                                    if (!hidden) { const v = (tip.getAttribute('title') || tip.innerText || '').trim(); if (v) return v; }
+                                }
+                                return '';
+                            }"""
                         ) or ""
                     except Exception:
                         err = ""
