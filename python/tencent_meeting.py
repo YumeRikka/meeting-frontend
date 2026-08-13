@@ -144,22 +144,33 @@ def _overlaps(start_ts, end_ts, buf, m):
 
 
 def find_free_account(candidates, start_ts, end_ts, buf):
-    """遍历候选账号，返回 (free_name, free_uid, details)。
+    """遍历候选账号，返回 (free_name, free_uid, details, status)。
     details: {name: {"userid":.., "conflicts":[会议...], "error":..或None}}。
-    找到第一个无冲突账号即返回；若全部冲突，free_name=None。
+    status:
+      "free"         -> 找到第一个无冲突账号（free_name 即其名）
+      "query_failed" -> 所有账号的会议列表查询均失败（REST 不可用），退化为尽力而为：
+                        返回第一个查询失败的账号，交由上层走网页建会
+                        （网页建会本身可用，真实时段冲突由腾讯侧兜底）
+      "conflict"     -> 所有账号都存在真实冲突，free_name=None
     """
     details = {}
+    query_failed = []  # 查询失败的账号（REST 不可用），按顺序记录
     for name, uid in candidates:
         try:
             meetings = get_meetings(uid)
         except Exception as e:
             details[name] = {"userid": uid, "conflicts": [], "error": str(e)}
+            query_failed.append((name, uid))
             continue
         conflicts = [m for m in meetings if _overlaps(start_ts, end_ts, buf, m)]
         details[name] = {"userid": uid, "conflicts": conflicts, "error": None}
         if not conflicts:
-            return name, uid, details
-    return None, None, details
+            return name, uid, details, "free"
+    # 没有「确认空闲」的账号：若至少有人是查询失败（非真实冲突），降级为尽力而为
+    if query_failed:
+        n, u = query_failed[0]
+        return n, u, details, "query_failed"
+    return None, None, details, "conflict"
 
 
 def _raw_create(subject, start_ts, duration_min, host_userid):
@@ -232,6 +243,15 @@ def create_meeting(subject, start_ts, duration_min, host_userid):
     return _raw_create(subject, start_ts, duration_min, host_userid)
 
 
+def _is_hard_input_error(e):
+    """判断异常是否由表单输入校验失败导致（主题/时间等输入问题）。
+    这类错误与账号无关，换账号重试必然复现，应直接抛出而非遍历所有账号空转。"""
+    s = str(e)
+    keys = ("校验", "全为空格", "会议主题", "停留", "校验错误", "格式不正确",
+            "必填", "不能为空", "invalid", "格式", "长度", "still")
+    return any(k in s for k in keys)
+
+
 def create_meeting_smart(subject, start_ts, duration_min, prefer="web", on_progress=None):
     """智能建会：遍历候选账号找一个请求时段空闲的建会；全冲突则返回冲突明细、不建会。
     建会方式：
@@ -251,22 +271,40 @@ def create_meeting_smart(subject, start_ts, duration_min, prefer="web", on_progr
 
     buf = CONFLICT_BUFFER
     end_ts = start_ts + duration_min * 60
-    free_name, free_uid, details = find_free_account(candidates, start_ts, end_ts, buf)
+    free_name, free_uid, details, status = find_free_account(candidates, start_ts, end_ts, buf)
     if free_name is None:
+        # status == "conflict"：所有账号均有真实冲突
         return {"ok": False, "reason": "conflict", "buffer": buf, "details": details}
+    if status == "query_failed":
+        # 冲突检测依赖的 REST 查询不可用（如接口未开通/凭证问题），不再据此拒绝建会，
+        # 降级为「尽力而为」：直接用网页建会（网页建会本身可用，真实冲突由腾讯侧兜底）。
+        errs = "; ".join(f"{n}:{d['error']}" for n, d in details.items() if d.get("error"))
+        print(f"[冲突检测不可用] REST 查询失败（{errs}），降级为直接网页建会（账号 {free_name}）。"
+              f"真实时段冲突将由腾讯会议侧校验。")
 
     prefer = os.getenv("CREATE_METHOD", prefer or "web")
     allow_rest_fallback = os.getenv("ALLOW_REST_FALLBACK", "0") == "1"
+    # 备选账号顺序：先试用冲突预检挑中的账号，再依次尝试其余账号，
+    # 避免单个账号的登录态/表单差异（如某账号表单字段结构不同）导致整体失败。
+    acct_order = [(free_name, free_uid)] + [(n, u) for (n, u) in candidates if u != free_uid]
     if prefer == "web":
-        try:
-            return _create_via_web(free_name, free_uid, subject, start_ts, duration_min, on_progress=on_progress)
-        except Exception as e:
-            if allow_rest_fallback:
-                # 仅在显式开启时回退 REST（会消耗 12 次/月配额，默认不开启）
-                print(f"[web-create 失败，回退 REST] {e}")
-            else:
-                # 默认不回退 REST，避免白白消耗每月创建配额；直接抛出网页建会错误
-                raise RuntimeError(f"网页建会失败（已禁用 REST 回退以保留配额）：{e}")
+        web_errs = []
+        for an, au in acct_order:
+            try:
+                return _create_via_web(an, au, subject, start_ts, duration_min, on_progress=on_progress)
+            except Exception as e:
+                web_errs.append(f"{an}({au}): {e}")
+                # 表单输入校验类错误（主题/时间等）在所有账号上必然复现，换账号重试无意义，直接抛出
+                if _is_hard_input_error(e):
+                    print(f"[web-create 输入校验失败，停止换账号重试] {an}: {e}")
+                    raise
+                print(f"[web-create 账号 {an} 失败，尝试下一个] {e}")
+                continue
+        # 所有账号网页建会均失败
+        if allow_rest_fallback:
+            print(f"[所有账号网页建会失败，回退 REST] {'; '.join(web_errs)}")
+        else:
+            raise RuntimeError("网页建会失败（已禁用 REST 回退以保留配额）：" + " | ".join(web_errs))
 
     url, code = _raw_create(subject, start_ts, duration_min, free_uid)
     return {

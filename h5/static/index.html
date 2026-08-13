@@ -174,6 +174,7 @@ const WK = ["周日","周一","周二","周三","周四","周五","周六"];
 const range = (n) => Array.from({ length: n }, (_, i) => i);
 
 let startTs = 0, endTs = 0, currentCard = "";
+let creating = false;   // 防止重复点击导致的多次建会/进度条错乱
 
 // ---------- 工具 ----------
 function pad2(n){ return String(n).padStart(2, "0"); }
@@ -353,10 +354,12 @@ function setProgress(percent, message){
 }
 
 $("btn-create").onclick = async () => {
+  if (creating) return;   // 已在建会中，忽略重复点击
   const subject = $("subject").value.trim();
   if (!subject || !startTs || !endTs) { $("create-info").innerHTML = `<span class="bad">请完整填写会议信息</span>`; return; }
   if (endTs <= startTs) { $("create-info").innerHTML = `<span class="bad">结束时间需晚于开始时间</span>`; return; }
   $("create-info").innerHTML = "";
+  creating = true;
   // 1) 发起建会任务
   let taskId = "";
   const r1 = await api("/api/meeting/create", { code: currentCard, subject, start: startTs, end: endTs });
@@ -364,6 +367,7 @@ $("btn-create").onclick = async () => {
     const msg = { not_found:"卡密不存在", disabled:"卡密已停用", expired:"卡密已过期", no_quota:"卡密次数已用完",
       invalid_params:"参数不完整", too_long: r1.data.detail || "会议时长超出上限" }[r1.data.reason] || "创建失败";
     $("create-info").innerHTML = `<span class="bad">${msg}</span>`;
+    creating = false;
     return;
   }
   taskId = r1.data.task_id;
@@ -384,6 +388,7 @@ $("btn-create").onclick = async () => {
         $("create-result").scrollIntoView({ behavior: "smooth" });
         // 建会成功后刷新剩余次数（已消耗 1 次）
         verifyCard(currentCard, { prefillTime: false, silent: true });
+        creating = false;
       } else {
         hideProgress();
         const err = d.error || {};
@@ -404,6 +409,7 @@ $("btn-create").onclick = async () => {
         }
         if (err.detail) extra += `<br><span class="bad">${err.detail}</span>`;
         $("create-info").innerHTML = `<span class="bad">${msg}</span>${extra}`;
+        creating = false;
       }
     }
   }, 700);

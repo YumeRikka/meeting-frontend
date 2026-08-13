@@ -489,9 +489,55 @@ def create_meeting(userid, subject, start_ts, end_ts, host_key="", headless=True
         if on_progress:
             on_progress(1, PROGRESS_STEPS[1])
         # ---- 会议主题 ----
-        sched.wait_for_selector('input[placeholder="请输入会议名称"]', timeout=10000)
-        sched.fill('input[placeholder="请输入会议名称"]', subject)
-        print(f"[create] 主题: {subject}")
+        subj_sel = 'input[placeholder="请输入会议名称"]'
+        sched.wait_for_selector(subj_sel, timeout=10000)
+
+        def _fill_subject(val):
+            """把会议主题写进 React 受控组件。
+            主路径用 Playwright 真实输入（fill 触发 React onChange，状态真正写入）；
+            兜底再用原生 setter + 强制刷新 React value tracker，双保险。"""
+            # 1) 真实输入（最可靠，直接驱动 React 状态）
+            try:
+                sched.fill(subj_sel, val, timeout=8000)
+            except Exception as e:
+                print(f"[warn] subject fill 失败，改用原生 setter 兜底: {e}")
+            # 2) 原生 setter + 强制 React 感知变化（防受控组件不更新）
+            try:
+                sched.evaluate(
+                    """(args) => {
+                        const sel = args[0], v = args[1];
+                        const el = document.querySelector(sel);
+                        if (!el) return;
+                        const proto = Object.getPrototypeOf(el);
+                        const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+                        setter.call(el, v);
+                        if (el._valueTracker) {
+                            try { el._valueTracker.setValue((el.value || '') + '\\u200b'); } catch (e2) {}
+                        }
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                    }""",
+                    [subj_sel, val],
+                )
+            except Exception as e:
+                print(f"[warn] subject 原生 setter 兜底异常: {e}")
+            return sched.evaluate(
+                "(args) => { const el = document.querySelector(args[0]); return el ? el.value : ''; }",
+                [subj_sel],
+            )
+
+        cur = _fill_subject(subject)
+        # 重新读取一次，确认 React 重渲染后主题未被清空（受控组件若状态没写入会被重置）
+        sched.wait_for_timeout(300)
+        cur = sched.evaluate(
+            "(args) => { const el = document.querySelector(args[0]); return el ? el.value : ''; }",
+            [subj_sel],
+        )
+        print(f"[create] 主题实际值: {cur!r} (期望 {subject!r})")
+        if not cur or not str(cur).strip():
+            raise RuntimeError(
+                f"会议主题填写失败（实际值={cur!r}），表单主题输入框可能占位符/结构已变，请运行 --inspect 校准"
+            )
         if on_progress:
             on_progress(2, PROGRESS_STEPS[2])
 
