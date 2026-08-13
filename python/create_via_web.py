@@ -298,10 +298,8 @@ def _set_date_input(sched, inp, date_str):
 
 
 def _pick_closest_time(sched, picker_loc, hh, mm):
-    """在已展开的时间列表里选 HH:MM（支持任意分钟）。
-    腾讯会议时间选择器是可滚动列表，可能为虚拟渲染（仅渲染当前可见的若干项），
-    因此这里逐屏滚动并读取可见项，命中精确 hh:mm 即点击；
-    仅当整个列表确实不存在该分钟档位（极少见）时才就近取整兜底。
+    """在已展开的时间列表里选 HH:MM（兜底用，仅当直接赋值输入框无效时调用）。
+    优先精确匹配；若列表（如虚拟滚动仅渲染部分项）没有该分钟，则就近取整后点击，
     返回 (h, m, snapped)，snapped=True 表示发生了取整。"""
     # 入参可能是字符串（来自 strftime），统一转 int，避免 diff() 里出现 str 运算
     hh = int(hh)
@@ -311,35 +309,21 @@ def _pick_closest_time(sched, picker_loc, hh, mm):
     n = items.count()
     if n == 0:
         raise RuntimeError("时间列表为空，无法选择时间")
-
-    def read(i):
+    cands = []
+    for i in range(n):
         it = items.nth(i)
         try:
             h = int((it.locator("input.hour").get_attribute("value") or -1))
             m = int((it.locator("input.minute").get_attribute("value") or -1))
         except Exception:
             h = m = -1
-        return h, m, i
-
-    # 逐屏滚动查找精确匹配（应对虚拟滚动只渲染可见项的情况）
-    for _ in range(400):
-        for i in range(n):
-            h, m, idx = read(i)
-            if h == hh and m == mm:
-                items.nth(idx).click(force=True)
-                return h, m, False
-        # 未命中：向下滚动一屏并等待新项渲染
-        try:
-            top_before = list_loc.evaluate("el => el.scrollTop")
-            list_loc.evaluate("el => el.scrollBy(0, el.clientHeight)")
-            sched.wait_for_timeout(60)
-            top_after = list_loc.evaluate("el => el.scrollTop")
-            if top_after == top_before:  # 已到底部，无法继续
-                break
-        except Exception:
-            break
-    # 兜底：就近取整（仅当列表确实无该分钟档位）
-    cands = [read(i) for i in range(n)]
+        cands.append((h, m, i))
+    # 1) 精确匹配
+    for (h, m, i) in cands:
+        if h == hh and m == mm:
+            items.nth(i).click(force=True)
+            return h, m, False
+    # 2) 就近取整（列表只提供部分档位时）
     valid = [c for c in cands if c[0] >= 0]
     if not valid:
         raise RuntimeError(f"时间列表无可选项，无法选择 {hh}:{mm}")
@@ -352,9 +336,12 @@ def _pick_closest_time(sched, picker_loc, hh, mm):
 
 
 def _set_time_picker(sched, picker_loc, hh, mm):
-    """在自定义时间选择器（<section class="custom-time-picker">）里选 HH:MM。
-    支持任意分钟：优先精确匹配，列表为虚拟滚动时自动滚动查找，仅极少见无该档位才就近取整。"""
-    # 1) 打开下拉：优先点 caret 图标（.symbol 容器），避免点到内部 input 只聚焦不展开
+    """在自定义时间选择器（<section class="custom-time-picker">）里选 HH:MM，支持任意分钟。
+    优先直接给选择器自身的 input.hour/input.minute 赋值（对应官网“可直接输入每分钟”的交互，
+    不依赖下拉列表渲染），若直接赋值无效则回退到列表精确点击（必要时就近取整）。"""
+    hh = int(hh)
+    mm = int(mm)
+    # 1) 打开下拉：优先点 caret 图标（.symbol 容器），保证输入框/列表交互就绪
     try:
         caret = picker_loc.locator(".symbol, .met-icon-caret-down--filled")
         if caret.count() > 0:
@@ -366,20 +353,34 @@ def _set_time_picker(sched, picker_loc, hh, mm):
             picker_loc.click(force=True, timeout=4000)
         except Exception:
             pass
-    sched.wait_for_timeout(600)
-    # 2) 等待下拉列表展开（去掉 hide 类后可见）
+    sched.wait_for_timeout(400)
+    # 2) 优先：直接给选择器自身的 hour/minute 输入框赋值（任意分钟）
     try:
-        sched.wait_for_selector("div.list:not(.hide) li.MetTimePicker_metTimePickerList__Eq1es",
-                                state="visible", timeout=6000)
-    except Exception:
-        # 兜底：再点一次展开，然后等任意可见 li
-        try:
-            picker_loc.click(force=True, timeout=3000)
-        except Exception:
-            pass
-        sched.wait_for_selector("li.MetTimePicker_metTimePickerList__Eq1es",
-                                state="visible", timeout=6000)
-    # 3) 选目标时间（精确优先，否则就近取整）
+        res = picker_loc.evaluate(
+            """(el, args) => {
+                const hh = args[0], mm = args[1];
+                const hIn = el.querySelector('input.hour');
+                const mIn = el.querySelector('input.minute');
+                if (!hIn || !mIn) return 'no-input';
+                const setVal = (inp, v) => {
+                    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                    setter.call(inp, v);
+                    inp.dispatchEvent(new Event('input', { bubbles: true }));
+                    inp.dispatchEvent(new Event('change', { bubbles: true }));
+                };
+                const H = String(hh).padStart(2, '0'), M = String(mm).padStart(2, '0');
+                setVal(hIn, H); setVal(mIn, M);
+                return (hIn.value === H && mIn.value === M) ? 'ok' : 'mismatch';
+            }""",
+            [hh, mm],
+        )
+        if res == 'ok':
+            sched.wait_for_timeout(200)
+            return hh, mm, False
+        print(f"[time] 直接赋值输入框未生效（{res}），回退列表点击")
+    except Exception as e:
+        print(f"[time] 直接赋值输入框异常，回退列表点击: {e}")
+    # 3) 回退：列表精确点击（必要时就近取整）
     h, m, snapped = _pick_closest_time(sched, picker_loc, hh, mm)
     sched.wait_for_timeout(300)
     return h, m, snapped
@@ -575,11 +576,26 @@ def create_meeting(userid, subject, start_ts, end_ts, host_key="", headless=True
                 info = []
                 for i, pg in enumerate(ctx.pages):
                     try:
-                        u = pg.url
-                        t = pg.inner_text() or ""
+                        u = pg.evaluate("() => location.href")
                     except Exception:
-                        u, t = "(无法读取)", ""
-                    info.append(f"[标签{i}] url={u}\n  文本片段={t[:300]!r}")
+                        u = "(无法读取)"
+                    try:
+                        t = pg.evaluate("() => document.body.innerText || ''")
+                    except Exception:
+                        t = ""
+                    # 抽取可能的校验错误文本
+                    err = ""
+                    try:
+                        err = pg.evaluate(
+                            "() => { const e = document.querySelector("
+                            "'.ant-form-item-explain-error, [class*=\"error\"], [class*=\"Error\"]'); "
+                            "return e ? (e.innerText || '').trim() : ''; }"
+                        ) or ""
+                    except Exception:
+                        err = ""
+                    info.append(f"[标签{i}] url={u}\n  文本片段={t[:200]!r}")
+                    if err:
+                        info.append(f"  ⚠ 校验错误: {err[:200]!r}")
                 raise RuntimeError(
                     "点击「预定会议」后仍停留在表单页，疑似被校验拦截。\n各标签状态：\n"
                     + "\n".join(info)
