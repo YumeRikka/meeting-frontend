@@ -22,6 +22,12 @@ SECRET_KEY = os.getenv("SECRET_KEY")
 HOST_KEY = os.getenv("HOST_KEY", "")
 # 冲突缓冲（秒）：新会议「前后各多少秒」内不能与已有会议重叠，默认 30 分钟。
 CONFLICT_BUFFER = int(os.getenv("CONFLICT_BUFFER", "1800"))
+# 单次 REST 请求超时（秒）：网络不可达时到点即抛错，避免长挂。
+REST_TIMEOUT = int(os.getenv("REST_TIMEOUT", "5"))
+# 反查总时限（秒）：网页建会后用 REST 拿会议号/链接，到期立即返回 ''，绝不「一直查」。
+LOOKUP_TIMEOUT = int(os.getenv("LOOKUP_TIMEOUT", "10"))
+# 冲突预检总时限（秒）：查每个账号会议列表的累计上限，到期降级为尽力而为。
+PRECHECK_TIMEOUT = int(os.getenv("PRECHECK_TIMEOUT", "6"))
 
 HOST = "api.meeting.qq.com"
 URI = "/v1/meetings"
@@ -56,13 +62,15 @@ def _headers(method, uri, body_str=""):
     }
 
 
-def _request(method, uri, body_str=""):
-    """统一发送请求（GET/POST 共用同一套签名），返回解析后的 JSON dict（无内容则返回 {}）；非 200 抛错。"""
+def _request(method, uri, body_str="", timeout=None):
+    """统一发送请求（GET/POST 共用同一套签名），返回解析后的 JSON dict（无内容则返回 {}）；非 200 抛错。
+    timeout: 覆盖单次请求超时（秒）；不传则用 REST_TIMEOUT。"""
     headers = _headers(method, uri, body_str)
+    _to = REST_TIMEOUT if timeout is None else timeout
     if method == "GET":
-        resp = requests.get(f"https://{HOST}{uri}", headers=headers, timeout=10)
+        resp = requests.get(f"https://{HOST}{uri}", headers=headers, timeout=_to)
     else:
-        resp = requests.post(f"https://{HOST}{uri}", headers=headers, data=body_str.encode("utf-8"), timeout=10)
+        resp = requests.post(f"https://{HOST}{uri}", headers=headers, data=body_str.encode("utf-8"), timeout=_to)
     if resp.status_code != 200:
         try:
             data = resp.json()
@@ -78,17 +86,44 @@ def _request(method, uri, body_str=""):
         return {}
 
 
-def get_meetings(userid):
-    """查询某账号的会议列表，返回会议信息 list（每项含 start_time/end_time/subject 等）。自动翻页。"""
+def get_meetings(userid, deadline=None, diag=None):
+    """查询某账号的会议列表，返回会议信息 list（每项含 start_time/end_time/subject 等）。自动翻页。
+    deadline: 单调时钟截止时间（time.monotonic()），到期即停止翻页，避免长挂。
+    diag: 可选 dict，用于回传诊断信息（pages/count/error）。"""
+    import time as _t
     meetings = []
     seen = set()
     pos = None
     for _ in range(10):  # 最多翻 10 页，防死循环
+        if deadline is not None and _t.monotonic() >= deadline:
+            break
         q = f"userid={userid}&instanceid=1"
         if pos is not None:
             q += f"&pos={pos}"
         uri = f"/v1/meetings?{q}"
-        data = _request("GET", uri)
+        # 单次请求超时跟随剩余预算，确保整个调用精确受限
+        req_timeout = None
+        if deadline is not None:
+            remain = deadline - _t.monotonic()
+            if remain <= 0:
+                break
+            req_timeout = max(1.0, min(REST_TIMEOUT, remain))
+        try:
+            data = _request("GET", uri, timeout=req_timeout)
+        except Exception as e:
+            if diag is not None:
+                diag["error"] = f"请求异常: {e}"
+            break
+        # 腾讯接口可能在 HTTP 200 体内返回 error_info（如 IP 未加白名单 500125）
+        err_info = data.get("error_info") if isinstance(data, dict) else None
+        if not err_info and isinstance(data, dict) and data.get("error_code"):
+            err_info = {"error_code": data.get("error_code"), "message": data.get("message")}
+        if err_info:
+            if diag is not None:
+                diag["error"] = f"API错误 {err_info.get('error_code')}: {err_info.get('message')}"
+            break
+        if diag is not None:
+            diag["pages"] = diag.get("pages", 0) + 1
         for m in data.get("meeting_info_list", []):
             mid = m.get("meeting_id")
             if mid in seen:
@@ -100,6 +135,8 @@ def get_meetings(userid):
         if not remaining or next_pos is None:
             break
         pos = next_pos
+    if diag is not None:
+        diag["count"] = len(meetings)
     return meetings
 
 
@@ -143,7 +180,7 @@ def _overlaps(start_ts, end_ts, buf, m):
     return (start_ts - buf) < m_end and (end_ts + buf) > m_start
 
 
-def find_free_account(candidates, start_ts, end_ts, buf):
+def find_free_account(candidates, start_ts, end_ts, buf, deadline=None):
     """遍历候选账号，返回 (free_name, free_uid, details, status)。
     details: {name: {"userid":.., "conflicts":[会议...], "error":..或None}}。
     status:
@@ -152,12 +189,13 @@ def find_free_account(candidates, start_ts, end_ts, buf):
                         返回第一个查询失败的账号，交由上层走网页建会
                         （网页建会本身可用，真实时段冲突由腾讯侧兜底）
       "conflict"     -> 所有账号都存在真实冲突，free_name=None
+    deadline: 单调时钟截止时间，到期即停止查询（退化为尽力而为）。
     """
     details = {}
     query_failed = []  # 查询失败的账号（REST 不可用），按顺序记录
     for name, uid in candidates:
         try:
-            meetings = get_meetings(uid)
+            meetings = get_meetings(uid, deadline=deadline)
         except Exception as e:
             details[name] = {"userid": uid, "conflicts": [], "error": str(e)}
             query_failed.append((name, uid))
@@ -204,35 +242,68 @@ def _raw_create(subject, start_ts, duration_min, host_userid):
 
 
 def _lookup_meeting_by_subject(userid, subject, start_ts):
-    """网页建会后，用 REST 查询（不限频）反查刚建的会议，拿到会议号+入会链接。
-    按 subject 模糊匹配挑选；为避免「网页设的时间与请求时间有偏差」导致漏匹配，时间窗口放宽到
-    ±7 天，并在匹配项中优先选【开始时间最靠后（最新创建）】的会议，确保返回的是刚建的那场。
-    找不到返回 ('', '')。"""
+    """网页建会后，用 REST 查询反查刚建的会议，拿到会议号+入会链接。
+    整体受 LOOKUP_TIMEOUT 秒硬上限约束（到期立即返回 ('', '')），绝不「一直查」。
+    匹配策略：
+      1) 优先按 subject 模糊匹配，取开始时间最靠后（最新创建）的会议；
+      2) 若 subject 匹配不到（如网页侧主题被改写/空白），退化为按 start_time ±10 分钟
+         精确匹配（我们明确知道请求的开始时间），提高命中率。
+    全程打印诊断，便于定位「为什么查不到」（IP 白名单 / 主题不一致 / 传播延迟等）。"""
     import time as _t
     start_ts = int(start_ts)
-    WIN = 7 * 24 * 3600  # ±7 天
-    for _ in range(6):  # 最多重试 6 次（间隔 2s，约 12s），等 REST 侧可见
+    WIN = 7 * 24 * 3600  # ±7 天（subject 匹配时用，放宽以防漏）
+    TIME_TOL = 600       # ±10 分钟（start_time 兜底匹配）
+    deadline = _t.monotonic() + LOOKUP_TIMEOUT
+    attempt = 0
+    last_diag = {}
+    while _t.monotonic() < deadline:
+        attempt += 1
+        diag = {}
         try:
-            meetings = get_meetings(userid)
-        except Exception:
+            meetings = get_meetings(userid, deadline=deadline, diag=diag)
+        except Exception as e:
             meetings = []
+            diag["error"] = f"请求异常: {e}"
+        # 1) 按 subject 模糊匹配，取开始时间最靠后（最新创建）的
         best, best_st = None, None
+        subj_matched = 0
         for m in meetings:
             ms = (m.get("subject") or "")
             if subject not in ms and ms not in subject:
                 continue
+            subj_matched += 1
             try:
                 mst = int(m.get("start_time") or 0)
             except (TypeError, ValueError):
                 mst = 0
             if abs(mst - start_ts) > WIN:  # 仅排除明显无关的旧会议（±7 天）
                 continue
-            # 优先选开始时间最靠后（最新创建）的会议 → 刚建的那场
             if best_st is None or mst > best_st:
                 best_st, best = mst, m
+        # 2) subject 没命中 → 按 start_time ±10 分钟兜底（会议确实已建）
+        if best is None:
+            for m in meetings:
+                try:
+                    mst = int(m.get("start_time") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if abs(mst - start_ts) <= TIME_TOL:
+                    if best_st is None or mst > best_st:
+                        best_st, best = mst, m
+        print(f"[lookup] 第{attempt}次：返回 {len(meetings)} 个会议，"
+              f"主题匹配 {subj_matched} 个"
+              + (f"，异常={diag.get('error')}" if diag.get("error") else "")
+              + (f"，命中会议号={best.get('meeting_code')}" if best else "，未命中"))
+        last_diag = diag
         if best is not None:
             return best.get("meeting_code", ""), best.get("join_url", "")
-        _t.sleep(2)
+        sleep_for = min(2.0, max(0.0, deadline - _t.monotonic()))
+        if sleep_for > 0:
+            _t.sleep(sleep_for)
+    print(f"[lookup] {LOOKUP_TIMEOUT}s 内未查到会议（subject='{subject}'，账号={userid}）。"
+          f"最后诊断：{last_diag or '无'}。"
+          f"可能原因：①生产出口 IP 未加腾讯开放平台白名单（error_code 500125）；"
+          f"②网页侧主题与请求不一致；③REST 传播延迟。会议本身应已创建成功。")
     return "", ""
 
 
@@ -273,7 +344,8 @@ def create_meeting_smart(subject, start_ts, duration_min, prefer="web", on_progr
 
     buf = CONFLICT_BUFFER
     end_ts = start_ts + duration_min * 60
-    free_name, free_uid, details, status = find_free_account(candidates, start_ts, end_ts, buf)
+    precheck_deadline = time.monotonic() + PRECHECK_TIMEOUT
+    free_name, free_uid, details, status = find_free_account(candidates, start_ts, end_ts, buf, deadline=precheck_deadline)
     if free_name is None:
         # status == "conflict"：所有账号均有真实冲突
         return {"ok": False, "reason": "conflict", "buffer": buf, "details": details}
