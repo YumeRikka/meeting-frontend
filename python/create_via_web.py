@@ -18,6 +18,7 @@ import re
 import time
 from pathlib import Path
 from datetime import datetime
+from contextlib import contextmanager
 
 try:
     from playwright.sync_api import sync_playwright
@@ -516,9 +517,9 @@ def _set_time(sched, start_ts, end_ts, on_progress=None):
 
 
 def _close_playwright_nonblocking(p, ctx):
-    """非阻塞关闭浏览器：受限沙箱里 ctx.close() 可能挂死（浏览器进程不退），
-    故放到守护线程里带超时关掉；主线程不等待，直接返回结果，由 with 块退出时的
-    p.stop() 强制杀掉驱动进程回收残留（p.stop 杀进程通常很快，不挂）。"""
+    """非阻塞关闭浏览器 context：放到守护线程里关 ctx.close()，最多等 2 秒；
+    超时则放弃，绝不阻塞主线程返回结果。playwright driver 的 p.stop() 由
+    _nonblocking_playwright 的 __exit__ 统一非阻塞处理。"""
     import threading
 
     def _do():
@@ -529,7 +530,35 @@ def _close_playwright_nonblocking(p, ctx):
 
     t = threading.Thread(target=_do, daemon=True)
     t.start()
-    t.join(timeout=5)  # 最多等 5 秒；超时则放弃，绝不阻塞主线程
+    t.join(timeout=2)  # 最多等 2 秒；超时则放弃，绝不阻塞主线程
+
+
+def _stop_playwright_nonblocking(p):
+    """非阻塞停止 playwright driver：守护线程 + 最多等 2 秒，绝不阻塞主线程。
+    浏览器进程若仍不响应，由 OS 回收，不再卡住结果返回。"""
+    import threading
+
+    def _do():
+        try:
+            p.stop()
+        except Exception:
+            pass
+
+    t = threading.Thread(target=_do, daemon=True)
+    t.start()
+    t.join(timeout=2)
+
+
+@contextmanager
+def _nonblocking_playwright():
+    """替代 `with sync_playwright() as p:`：退出时非阻塞关闭，绝不因浏览器进程
+    不响应而卡死。关键：把 p.stop() 放到守护线程带超时执行，避免 `with` 原生的
+    p.stop() 在浏览器进程不响应时阻塞数十秒（表现为「结果页已抓取成功却还等很久」）。"""
+    p = sync_playwright().start()
+    try:
+        yield p
+    finally:
+        _stop_playwright_nonblocking(p)
 
 
 def _scrape_result(page):
@@ -605,7 +634,7 @@ def create_meeting(userid, subject, start_ts, end_ts, host_key="", headless=True
     if on_progress:
         on_progress(0, PROGRESS_STEPS[0])
 
-    with sync_playwright() as p:
+    with _nonblocking_playwright() as p:
         ctx = p.chromium.launch_persistent_context(str(profile), headless=headless, args=CHROME_ARGS)
         # 自动接受任何原生对话框（alert/confirm/beforeunload），避免无头模式下卡死
         ctx.on("dialog", lambda d: _safe_accept(d))
