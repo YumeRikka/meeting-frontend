@@ -248,63 +248,82 @@ def _lookup_meeting_by_subject(userid, subject, start_ts):
       1) 优先按 subject 模糊匹配，取开始时间最靠后（最新创建）的会议；
       2) 若 subject 匹配不到（如网页侧主题被改写/空白），退化为按 start_time ±10 分钟
          精确匹配（我们明确知道请求的开始时间），提高命中率。
-    全程打印诊断，便于定位「为什么查不到」（IP 白名单 / 主题不一致 / 传播延迟等）。"""
+    全程打印诊断，便于定位「为什么查不到」（IP 白名单 / 主题不一致 / 首包 DNS 慢等）。
+    注意：requests 的 timeout 不覆盖 DNS 解析，单次请求若卡在 DNS 可能超过该超时；
+    因此额外用「守护线程 + join(LOOKUP_TIMEOUT)」做终极硬上限——即便某次请求卡死，
+    也保证本函数在 LOOKUP_TIMEOUT 秒内必定返回，绝不无限挂起。"""
     import time as _t
-    start_ts = int(start_ts)
+    import threading
+
     WIN = 7 * 24 * 3600  # ±7 天（subject 匹配时用，放宽以防漏）
     TIME_TOL = 600       # ±10 分钟（start_time 兜底匹配）
-    deadline = _t.monotonic() + LOOKUP_TIMEOUT
-    attempt = 0
-    last_diag = {}
-    while _t.monotonic() < deadline:
-        attempt += 1
-        diag = {}
-        try:
-            meetings = get_meetings(userid, deadline=deadline, diag=diag)
-        except Exception as e:
-            meetings = []
-            diag["error"] = f"请求异常: {e}"
-        # 1) 按 subject 模糊匹配，取开始时间最靠后（最新创建）的
-        best, best_st = None, None
-        subj_matched = 0
-        for m in meetings:
-            ms = (m.get("subject") or "")
-            if subject not in ms and ms not in subject:
-                continue
-            subj_matched += 1
+    result = {"code": "", "url": ""}
+
+    def _run():
+        deadline = _t.monotonic() + LOOKUP_TIMEOUT
+        attempt = 0
+        last_diag = {}
+        while _t.monotonic() < deadline:
+            attempt += 1
+            diag = {}
             try:
-                mst = int(m.get("start_time") or 0)
-            except (TypeError, ValueError):
-                mst = 0
-            if abs(mst - start_ts) > WIN:  # 仅排除明显无关的旧会议（±7 天）
-                continue
-            if best_st is None or mst > best_st:
-                best_st, best = mst, m
-        # 2) subject 没命中 → 按 start_time ±10 分钟兜底（会议确实已建）
-        if best is None:
+                meetings = get_meetings(userid, deadline=deadline, diag=diag)
+            except Exception as e:
+                meetings = []
+                diag["error"] = f"请求异常: {e}"
+            # 1) 按 subject 模糊匹配，取开始时间最靠后（最新创建）的
+            best, best_st = None, None
+            subj_matched = 0
             for m in meetings:
+                ms = (m.get("subject") or "")
+                if subject not in ms and ms not in subject:
+                    continue
+                subj_matched += 1
                 try:
                     mst = int(m.get("start_time") or 0)
                 except (TypeError, ValueError):
+                    mst = 0
+                if abs(mst - start_ts) > WIN:  # 仅排除明显无关的旧会议（±7 天）
                     continue
-                if abs(mst - start_ts) <= TIME_TOL:
-                    if best_st is None or mst > best_st:
-                        best_st, best = mst, m
-        print(f"[lookup] 第{attempt}次：返回 {len(meetings)} 个会议，"
-              f"主题匹配 {subj_matched} 个"
-              + (f"，异常={diag.get('error')}" if diag.get("error") else "")
-              + (f"，命中会议号={best.get('meeting_code')}" if best else "，未命中"))
-        last_diag = diag
-        if best is not None:
-            return best.get("meeting_code", ""), best.get("join_url", "")
-        sleep_for = min(2.0, max(0.0, deadline - _t.monotonic()))
-        if sleep_for > 0:
-            _t.sleep(sleep_for)
-    print(f"[lookup] {LOOKUP_TIMEOUT}s 内未查到会议（subject='{subject}'，账号={userid}）。"
-          f"最后诊断：{last_diag or '无'}。"
-          f"可能原因：①生产出口 IP 未加腾讯开放平台白名单（error_code 500125）；"
-          f"②网页侧主题与请求不一致；③REST 传播延迟。会议本身应已创建成功。")
-    return "", ""
+                if best_st is None or mst > best_st:
+                    best_st, best = mst, m
+            # 2) subject 没命中 → 按 start_time ±10 分钟兜底（会议确实已建）
+            if best is None:
+                for m in meetings:
+                    try:
+                        mst = int(m.get("start_time") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if abs(mst - start_ts) <= TIME_TOL:
+                        if best_st is None or mst > best_st:
+                            best_st, best = mst, m
+            print(f"[lookup] 第{attempt}次：返回 {len(meetings)} 个会议，"
+                  f"主题匹配 {subj_matched} 个"
+                  + (f"，异常={diag.get('error')}" if diag.get("error") else "")
+                  + (f"，命中会议号={best.get('meeting_code')}" if best else "，未命中"))
+            last_diag = diag
+            if best is not None:
+                result["code"] = best.get("meeting_code", "")
+                result["url"] = best.get("join_url", "")
+                return
+            sleep_for = min(2.0, max(0.0, deadline - _t.monotonic()))
+            if sleep_for > 0:
+                _t.sleep(sleep_for)
+        print(f"[lookup] {LOOKUP_TIMEOUT}s 内未查到会议（subject='{subject}'，账号={userid}）。"
+              f"最后诊断：{last_diag or '无'}。"
+              f"可能原因：①生产出口 IP 未加腾讯开放平台白名单（error_code 500125）；"
+              f"②网页侧主题与请求不一致；③REST 传播延迟/首包 DNS 解析慢。会议本身应已创建成功。")
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(LOOKUP_TIMEOUT)
+    if t.is_alive():
+        # 单次请求卡死（如首包 DNS 解析挂起，requests 的 timeout 不覆盖 DNS），强制放弃。
+        print(f"[lookup] 反查在 LOOKUP_TIMEOUT={LOOKUP_TIMEOUT}s 硬上限被强制中断"
+              f"（疑似单次请求卡死，常见于首包 DNS 解析挂起）。会议本身应已创建成功，"
+              f"可在腾讯会议客户端查看；如需拿会议号可稍后手动查询或调大 LOOKUP_TIMEOUT。")
+        return "", ""
+    return result["code"], result["url"]
 
 
 def create_meeting(subject, start_ts, duration_min, host_userid):
