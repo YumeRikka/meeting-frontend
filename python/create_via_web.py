@@ -39,9 +39,9 @@ CHROME_ARGS = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
 PROGRESS_STEPS = [
     "正在准备浏览器与登录态…",   # 0
     "正在打开预定会议页面…",      # 1
-    "正在设置会议时间…",          # 2
-    "正在设置主持人密钥…",        # 3
-    "已填写会议主题",             # 4
+    "正在设置主持人密钥…",        # 2
+    "已填写会议主题",             # 3
+    "正在设置会议时间…",          # 4
     "正在提交并创建会议…",        # 5
     "正在获取会议信息…",          # 6
 ]
@@ -463,7 +463,7 @@ def _set_time(sched, start_ts, end_ts, on_progress=None):
             （优先精确匹配；列表为虚拟滚动时自动滚动查找，仅极少见无该档位才就近取整）。
     不再强制对齐到 :00/:30；仅做「不能早于当前时间」与「结束晚于开始」的兜底校正。"""
     if on_progress:
-        on_progress(2, PROGRESS_STEPS[2])
+        on_progress(4, PROGRESS_STEPS[4])
 
     now = int(time.time())
     # 兜底：不允许开始时间早于当前（腾讯会报「时间不能早于当前时间」）
@@ -513,7 +513,7 @@ def _set_time(sched, start_ts, end_ts, on_progress=None):
             msg = "已设置会议时间"
             if snapped:
                 msg += "（部分分钟已就近取整到可选档位）"
-            on_progress(2, msg)
+            on_progress(4, msg)
 
 
 def _close_playwright_nonblocking(p, ctx):
@@ -669,7 +669,7 @@ def create_meeting(userid, subject, start_ts, end_ts, host_key="", headless=True
 
         # ---- 主持人密钥：勾选「开启密钥」复选框（点击 label 切换，原生 input 是 readonly），再填值 ----
         if on_progress:
-            on_progress(3, PROGRESS_STEPS[3])
+            on_progress(2, PROGRESS_STEPS[2])
         if host_key:
             try:
                 chk_label = sched.get_by_text("开启密钥", exact=False).first
@@ -685,7 +685,7 @@ def create_meeting(userid, subject, start_ts, end_ts, host_key="", headless=True
         #      若在它们之前填主题，重渲染会用空 state 把主题输入框清空 → 报「会议主题不能全为空格」。
         #      用 press_sequentially 逐字符真实输入，确保 React onChange 真正写入 state。）----
         if on_progress:
-            on_progress(4, PROGRESS_STEPS[4])
+            on_progress(3, PROGRESS_STEPS[3])
         subj_sel = 'input[placeholder="请输入会议名称"]'
         sched.wait_for_selector(subj_sel, timeout=10000)
 
@@ -724,7 +724,7 @@ def create_meeting(userid, subject, start_ts, end_ts, host_key="", headless=True
         # ---- 会议时间（放在最后填！取消勾选/密钥/主题交互会触发 React 重渲染，
         #      把已写入 state 的时间值冲掉；故时间必须最后落定、提交前不再有任何交互）----
         if on_progress:
-            on_progress(2, PROGRESS_STEPS[2])
+            on_progress(4, PROGRESS_STEPS[4])
         _set_time(sched, start_ts, end_ts, on_progress=on_progress)
 
         # ---- 提交：「预定会议」按钮（精确 class 定位 button.meeting-button-area-confirm）----
