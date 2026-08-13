@@ -65,12 +65,20 @@ def _headers(method, uri, body_str=""):
 def _request(method, uri, body_str="", timeout=None):
     """统一发送请求（GET/POST 共用同一套签名），返回解析后的 JSON dict（无内容则返回 {}）；非 200 抛错。
     timeout: 覆盖单次请求超时（秒）；不传则用 REST_TIMEOUT。"""
+    import time as _t
     headers = _headers(method, uri, body_str)
     _to = REST_TIMEOUT if timeout is None else timeout
-    if method == "GET":
-        resp = requests.get(f"https://{HOST}{uri}", headers=headers, timeout=_to)
-    else:
-        resp = requests.post(f"https://{HOST}{uri}", headers=headers, data=body_str.encode("utf-8"), timeout=_to)
+    ts = _t.monotonic()
+    try:
+        if method == "GET":
+            resp = requests.get(f"https://{HOST}{uri}", headers=headers, timeout=_to)
+        else:
+            resp = requests.post(f"https://{HOST}{uri}", headers=headers, data=body_str.encode("utf-8"), timeout=_to)
+    except Exception as e:
+        # 超时=5s 却耗时远超 → 卡在 DNS/代理（requests 的 timeout 不覆盖 DNS），属外部网络问题
+        print(f"[rest] {method} {uri} 失败，耗时={_t.monotonic()-ts:.2f}s（timeout={_to}s）: {e}")
+        raise
+    print(f"[rest] {method} {uri} 耗时={_t.monotonic()-ts:.2f}s status={resp.status_code}")
     if resp.status_code != 200:
         try:
             data = resp.json()
