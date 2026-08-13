@@ -38,9 +38,9 @@ CHROME_ARGS = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
 PROGRESS_STEPS = [
     "正在准备浏览器与登录态…",   # 0
     "正在打开预定会议页面…",      # 1
-    "已填写会议主题",             # 2
-    "正在设置会议时间…",          # 3
-    "正在设置主持人密钥…",        # 4
+    "正在设置会议时间…",          # 2
+    "正在设置主持人密钥…",        # 3
+    "已填写会议主题",             # 4
     "正在提交并创建会议…",        # 5
     "正在获取会议信息…",          # 6
 ]
@@ -393,7 +393,7 @@ def _set_time(sched, start_ts, end_ts, on_progress=None):
             （优先精确匹配；列表为虚拟滚动时自动滚动查找，仅极少见无该档位才就近取整）。
     不再强制对齐到 :00/:30；仅做「不能早于当前时间」与「结束晚于开始」的兜底校正。"""
     if on_progress:
-        on_progress(3, PROGRESS_STEPS[3])
+        on_progress(2, PROGRESS_STEPS[2])
 
     now = int(time.time())
     # 兜底：不允许开始时间早于当前（腾讯会报「时间不能早于当前时间」）
@@ -437,11 +437,11 @@ def _set_time(sched, start_ts, end_ts, on_progress=None):
         raise RuntimeError(
             "未找到时间选择器（.custom-time-picker），请运行 --inspect 并贴出截图校准。"
         )
-    if on_progress:
-        msg = "已设置会议时间"
-        if snapped:
-            msg += "（部分分钟已就近取整到可选档位）"
-        on_progress(3, msg)
+        if on_progress:
+            msg = "已设置会议时间"
+            if snapped:
+                msg += "（部分分钟已就近取整到可选档位）"
+            on_progress(2, msg)
 
 
 def _scrape_result(page):
@@ -488,59 +488,6 @@ def create_meeting(userid, subject, start_ts, end_ts, host_key="", headless=True
         sched = _open_scheduler(ctx, page)
         if on_progress:
             on_progress(1, PROGRESS_STEPS[1])
-        # ---- 会议主题 ----
-        subj_sel = 'input[placeholder="请输入会议名称"]'
-        sched.wait_for_selector(subj_sel, timeout=10000)
-
-        def _fill_subject(val):
-            """把会议主题写进 React 受控组件。
-            主路径用 Playwright 真实输入（fill 触发 React onChange，状态真正写入）；
-            兜底再用原生 setter + 强制刷新 React value tracker，双保险。"""
-            # 1) 真实输入（最可靠，直接驱动 React 状态）
-            try:
-                sched.fill(subj_sel, val, timeout=8000)
-            except Exception as e:
-                print(f"[warn] subject fill 失败，改用原生 setter 兜底: {e}")
-            # 2) 原生 setter + 强制 React 感知变化（防受控组件不更新）
-            try:
-                sched.evaluate(
-                    """(args) => {
-                        const sel = args[0], v = args[1];
-                        const el = document.querySelector(sel);
-                        if (!el) return;
-                        const proto = Object.getPrototypeOf(el);
-                        const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
-                        setter.call(el, v);
-                        if (el._valueTracker) {
-                            try { el._valueTracker.setValue((el.value || '') + '\\u200b'); } catch (e2) {}
-                        }
-                        el.dispatchEvent(new Event('input', { bubbles: true }));
-                        el.dispatchEvent(new Event('change', { bubbles: true }));
-                    }""",
-                    [subj_sel, val],
-                )
-            except Exception as e:
-                print(f"[warn] subject 原生 setter 兜底异常: {e}")
-            return sched.evaluate(
-                "(args) => { const el = document.querySelector(args[0]); return el ? el.value : ''; }",
-                [subj_sel],
-            )
-
-        cur = _fill_subject(subject)
-        # 重新读取一次，确认 React 重渲染后主题未被清空（受控组件若状态没写入会被重置）
-        sched.wait_for_timeout(300)
-        cur = sched.evaluate(
-            "(args) => { const el = document.querySelector(args[0]); return el ? el.value : ''; }",
-            [subj_sel],
-        )
-        print(f"[create] 主题实际值: {cur!r} (期望 {subject!r})")
-        if not cur or not str(cur).strip():
-            raise RuntimeError(
-                f"会议主题填写失败（实际值={cur!r}），表单主题输入框可能占位符/结构已变，请运行 --inspect 校准"
-            )
-        if on_progress:
-            on_progress(2, PROGRESS_STEPS[2])
-
         # ---- 会议时间 ----
         _set_time(sched, start_ts, end_ts, on_progress=on_progress)
 
@@ -569,7 +516,7 @@ def create_meeting(userid, subject, start_ts, end_ts, host_key="", headless=True
 
         # ---- 主持人密钥：勾选「开启密钥」复选框（点击 label 切换，原生 input 是 readonly），再填值 ----
         if on_progress:
-            on_progress(4, PROGRESS_STEPS[4])
+            on_progress(3, PROGRESS_STEPS[3])
         if host_key:
             try:
                 chk_label = sched.get_by_text("开启密钥", exact=False).first
@@ -580,6 +527,63 @@ def create_meeting(userid, subject, start_ts, end_ts, host_key="", headless=True
                 print(f"[create] 主持人密钥: {host_key}")
             except Exception as e:
                 print(f"[warn] 设置主持人密钥失败（跳过）: {e}")
+
+        # ---- 会议主题（最后一步填！前面的时间/勾选/密钥交互会触发 React 重渲染，
+        #      若在它们之前填主题，重渲染会用空 state 把主题输入框清空 → 报「会议主题不能全为空格」。
+        #      用 press_sequentially 逐字符真实输入，确保 React onChange 真正写入 state。）----
+        if on_progress:
+            on_progress(4, PROGRESS_STEPS[4])
+        subj_sel = 'input[placeholder="请输入会议名称"]'
+        sched.wait_for_selector(subj_sel, timeout=10000)
+
+        def _fill_subject_robust(val):
+            loc = sched.locator(subj_sel)
+            try:
+                loc.click(timeout=5000)
+                loc.fill("")
+                loc.press_sequentially(val, delay=25)
+            except Exception as e:
+                print(f"[warn] subject press_sequentially 失败，改用原生 setter 兜底: {e}")
+                try:
+                    sched.evaluate(
+                        """(args) => {
+                            const sel = args[0], v = args[1];
+                            const el = document.querySelector(sel);
+                            if (!el) return;
+                            const proto = Object.getPrototypeOf(el);
+                            const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+                            setter.call(el, v);
+                            if (el._valueTracker) {
+                                try { el._valueTracker.setValue((el.value || '') + '\\u200b'); } catch (e2) {}
+                            }
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                        }""",
+                        [subj_sel, val],
+                    )
+                except Exception as e2:
+                    print(f"[warn] subject 原生 setter 兜底也失败: {e2}")
+            return sched.evaluate(
+                "(args) => { const el = document.querySelector(args[0]); return el ? el.value : ''; }",
+                [subj_sel],
+            )
+
+        cur = ""
+        for _try in range(3):
+            cur = _fill_subject_robust(subject)
+            sched.wait_for_timeout(300)
+            cur = sched.evaluate(
+                "(args) => { const el = document.querySelector(args[0]); return el ? el.value : ''; }",
+                [subj_sel],
+            )
+            if cur and cur.strip():
+                break
+            print(f"[warn] 主题第 {_try + 1} 次回填仍为空，重试…")
+        print(f"[create] 主题实际值: {cur!r} (期望 {subject!r})")
+        if not cur or not str(cur).strip():
+            raise RuntimeError(
+                f"会议主题填写失败（实际值={cur!r}），主题输入框占位符/结构可能已变，请运行 --inspect 校准"
+            )
 
         # ---- 提交：「预定会议」按钮（精确 class 定位 button.meeting-button-area-confirm）----
         if on_progress:
@@ -642,6 +646,26 @@ def create_meeting(userid, subject, start_ts, end_ts, host_key="", headless=True
                     info.append(f"[标签{i}] url={u}\n  文本片段={t[:200]!r}")
                     if err:
                         info.append(f"  ⚠ 校验错误: {err[:200]!r}")
+                # 抓主题/时间字段实际值，便于定位是哪个字段没填进去
+                try:
+                    fields = sched.evaluate(
+                        """() => {
+                            const out = {};
+                            const s = document.querySelector('input[placeholder=\"请输入会议名称\"]');
+                            out.subject = s ? s.value : '<无主题框>';
+                            const hp = document.querySelector('.start .custom-time-picker input.hour');
+                            const mp = document.querySelector('.start .custom-time-picker input.minute');
+                            const he = document.querySelector('.end .custom-time-picker input.hour');
+                            const me = document.querySelector('.end .custom-time-picker input.minute');
+                            out.start = (hp && mp) ? (hp.value + ':' + mp.value) : '<无起始时间>';
+                            out.end = (he && me) ? (he.value + ':' + me.value) : '<无结束时间>';
+                            return JSON.stringify(out);
+                        }"""
+                    )
+                    if fields:
+                        info.append(f"  🔍 字段值: {fields}")
+                except Exception:
+                    pass
                 raise RuntimeError(
                     "点击「预定会议」后仍停留在表单页，疑似被校验拦截。\n各标签状态：\n"
                     + "\n".join(info)
