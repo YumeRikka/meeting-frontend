@@ -10,6 +10,6 @@
     window.API_BASE = "http://localhost:5000";
   } else {
     // 生产环境占位（CI 发布时会被 config.prod.js 覆盖）
-    window.API_BASE = "";
+    window.API_BASE = "https://api.rikka.com.cn";
   }
 })();
