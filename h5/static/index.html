@@ -165,9 +165,13 @@ const $ = (id) => document.getElementById(id);
 const API_BASE = (window.API_BASE || "").replace(/\/+$/, "");
 const api = (path, body) => fetch(API_BASE + path, {
   method: "POST",
-  headers: { "Content-Type": "application/json" },
+  headers: { "Content-Type": "text/plain" },
   body: JSON.stringify(body),
-}).then(r => r.json().then(d => ({ status: r.status, data: d })));
+}).then(async r => {
+  let d;
+  try { d = await r.json(); } catch { d = { ok: false, reason: "http_" + r.status }; }
+  return { status: r.status, data: d };
+});
 
 const WHEEL_H = 40, VISIBLE = 5, PAD = (VISIBLE - 1) / 2 * WHEEL_H;
 const WK = ["周日","周一","周二","周三","周四","周五","周六"];

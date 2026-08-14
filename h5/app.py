@@ -16,6 +16,7 @@ import sys
 import time
 import threading
 import uuid
+import json
 from pathlib import Path
 
 from flask import Flask, request, jsonify, send_from_directory
@@ -50,12 +51,29 @@ def _err(reason, status=400, **extra):
     return jsonify({"ok": False, "reason": reason, **extra}), status
 
 
+def _json():
+    """兼容读取请求体 JSON：优先标准 application/json；
+    前端为绕开跨域 OPTIONS 预检改用 text/plain 时也正确解析。"""
+    d = request.get_json(silent=True)
+    if isinstance(d, dict):
+        return d
+    raw = request.get_data(as_text=True)
+    if raw:
+        try:
+            v = json.loads(raw)
+            if isinstance(v, dict):
+                return v
+        except Exception:
+            pass
+    return {}
+
+
 # ---------- 卡密 ----------
 @app.route("/api/card/verify", methods=["POST", "OPTIONS"])
 def card_verify():
     if request.method == "OPTIONS":
         return "", 204
-    code = ((request.json or {}).get("code") or "").strip().upper()
+    code = (_json().get("code") or "").strip().upper()
     if not cards.exists(code):
         return _err("not_found")
     res = cards.verify(code)
@@ -119,7 +137,7 @@ def _run_create(task_id, code, subject, start, duration):
 def meeting_create():
     if request.method == "OPTIONS":
         return "", 204
-    data = request.json or {}
+    data = _json()
     code = (data.get("code") or "").strip().upper()
     subject = (data.get("subject") or "").strip()
     try:
@@ -177,7 +195,7 @@ def meeting_progress():
 def meeting_cancel():
     if request.method == "OPTIONS":
         return "", 204
-    data = request.json or {}
+    data = _json()
     code = (data.get("code") or "").strip().upper()
     meeting_code = (data.get("meeting_code") or "").strip()
 
@@ -216,7 +234,7 @@ def meeting_cancel():
 
 # ---------- 管理员：生成卡密 ----------
 def _admin_ok():
-    token = (request.json or {}).get("token") or request.args.get("token") or ""
+    token = _json().get("token") or request.args.get("token") or ""
     return bool(ADMIN_TOKEN) and token == ADMIN_TOKEN
 
 
@@ -226,7 +244,7 @@ def admin_create():
         return "", 204
     if not _admin_ok():
         return _err("forbidden", status=403)
-    data = request.json or {}
+    data = _json()
     try:
         count = int(data.get("count") or 1)
         quota = int(data.get("quota") or 1)

@@ -60,11 +60,20 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-const api = (path, body, isGet) => fetch(path, {
+// 后端 API 基地址：默认同源（本地/同域名部署）。
+// 部署到 GitHub Pages 等独立前端时，在同目录新建 config.js 写入：
+//   window.API_BASE = "https://api.rikka.com.cn";
+const API_BASE = (window.API_BASE || "").replace(/\/+$/, "");
+const api = (path, body, isGet) => fetch(API_BASE + path, {
   method: isGet ? "GET" : "POST",
-  headers: { "Content-Type": "application/json" },
+  headers: { "Content-Type": "text/plain" },
   body: isGet ? undefined : JSON.stringify(body),
-}).then(r => r.json().then(d => ({ status: r.status, data: d })));
+}).then(async r => {
+  let data;
+  try { data = await r.json(); }
+  catch { data = { ok: false, reason: "http_" + r.status }; }
+  return { status: r.status, data };
+});
 
 $("btn-gen").onclick = async () => {
   const token = $("token").value.trim();
