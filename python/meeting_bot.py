@@ -347,6 +347,8 @@ def main():
                                 f"入会链接：{res['url']}\n"
                                 f"会议号：{code}"
                             )
+                            if res.get("host_key"):
+                                reply += f"\n主持人密钥：{res['host_key']}"
                         else:
                             buf_min = res["buffer"] // 60
                             lines = [

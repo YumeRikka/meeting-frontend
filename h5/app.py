@@ -123,6 +123,7 @@ def _run_create(task_id, code, subject, start, duration):
         "account": res["account"],
         "url": res["url"],
         "code": res["code"],
+        "host_key": res.get("host_key", ""),
         "subject": subject,
         "start": start,
         "end": start + duration * 60,

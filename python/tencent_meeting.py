@@ -415,6 +415,7 @@ def create_meeting_smart(subject, start_ts, duration_min, prefer="web", on_progr
         "account": free_name,
         "userid": free_uid,
         "buffer": buf,
+        "host_key": HOST_KEY,
         "method": "rest",
     }
 
@@ -449,6 +450,7 @@ def _create_via_web(free_name, free_uid, subject, start_ts, duration_min, on_pro
         "account": free_name,
         "userid": free_uid,
         "buffer": CONFLICT_BUFFER,
+        "host_key": res.get("host_key", ""),
         "method": "web",
     }
 

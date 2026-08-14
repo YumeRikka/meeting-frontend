@@ -193,7 +193,9 @@ function fmtInvite(inv) {
   const t1 = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
   const t2 = `${pad2(end.getHours())}:${pad2(end.getMinutes())}`;
   const code = inv.code.replace(/\D/g, "").padStart(9, "0").replace(/(\d{3})(\d{3})(\d{3})/, "$1-$2-$3");
-  return `${inv.account} 邀请您参加腾讯会议\n会议主题：${inv.subject}\n会议时间：${date} ${t1}-${t2}\n入会链接：${inv.url}\n会议号：${code}`;
+  let s = `${inv.account} 邀请您参加腾讯会议\n会议主题：${inv.subject}\n会议时间：${date} ${t1}-${t2}\n入会链接：${inv.url}\n会议号：${code}`;
+  if (inv.host_key) s += `\n主持人密钥：${inv.host_key}`;
+  return s;
 }
 
 // ---------- 滚轮时间选择器 ----------
