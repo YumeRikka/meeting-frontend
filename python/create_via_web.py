@@ -16,6 +16,7 @@ import sys
 import json
 import re
 import time
+import asyncio
 from pathlib import Path
 from datetime import datetime
 from contextlib import contextmanager
@@ -549,16 +550,50 @@ def _stop_playwright_nonblocking(p):
     t.join(timeout=2)
 
 
+def _reset_thread_event_loop():
+    """卸载 sync_playwright().start() 在当前线程安装的 asyncio 事件循环。
+
+    sync_playwright().start() 会在「调用它的线程」里 new 一个事件循环并 set 为当前线程的 loop。
+    而 _stop_playwright_nonblocking 把 p.stop() 丢到**另一个守护线程**执行，导致该 loop 没在
+    「当前线程」被正确卸载。若同一线程随后再调用 sync_playwright().start()（例如 create_meeting_smart
+    里换账号重试），asyncio.get_event_loop().is_running() 仍为真 → 误报
+    "It looks like you are using Playwright Sync API inside the asyncio loop"。
+
+    这里在当前线程显式把它关掉、置空，保证同线程下一次 start() 能新建一个干净的 loop。"""
+    try:
+        loop = asyncio.get_event_loop()
+    except Exception:
+        loop = None
+    if loop is not None:
+        try:
+            if loop.is_running():
+                loop.stop()
+        except Exception:
+            pass
+        try:
+            if not loop.is_closed():
+                loop.close()
+        except Exception:
+            pass
+    try:
+        asyncio.set_event_loop(None)
+    except Exception:
+        pass
+
+
 @contextmanager
 def _nonblocking_playwright():
     """替代 `with sync_playwright() as p:`：退出时非阻塞关闭，绝不因浏览器进程
     不响应而卡死。关键：把 p.stop() 放到守护线程带超时执行，避免 `with` 原生的
-    p.stop() 在浏览器进程不响应时阻塞数十秒（表现为「结果页已抓取成功却还等很久」）。"""
+    p.stop() 在浏览器进程不响应时阻塞数十秒（表现为「结果页已抓取成功却还等很久」）。
+    退出后显式卸载当前线程的 asyncio 事件循环，避免同线程换账号重试时误报
+    "Sync API inside the asyncio loop"。"""
     p = sync_playwright().start()
     try:
         yield p
     finally:
         _stop_playwright_nonblocking(p)
+        _reset_thread_event_loop()
 
 
 def _scrape_result(page):
@@ -687,7 +722,19 @@ def create_meeting(userid, subject, start_ts, end_ts, host_key="", headless=True
         if on_progress:
             on_progress(3, PROGRESS_STEPS[3])
         subj_sel = 'input[placeholder="请输入会议名称"]'
-        sched.wait_for_selector(subj_sel, timeout=10000)
+        try:
+            sched.wait_for_selector(subj_sel, timeout=30000)
+        except Exception:
+            # 走到这里说明已过 _open_scheduler 的登录态检测，通常是页面加载慢（尤其 NAS 冷启动）；
+            # 若实际是登录态失效跳转到了登录页，给出明确提示。
+            try:
+                on_login_page = bool(page.query_selector("input[type=password]")) or "login" in (page.url or "").lower()
+            except Exception:
+                on_login_page = False
+            if on_login_page:
+                raise RuntimeError(
+                    f"账号 {userid} 登录态已失效，请重新登录（运行 create_via_web.py --login {userid}）")
+            raise
 
         def _fill_subject_robust(val):
             # 腾讯 met-input 的 onChange 源码：H.current ? J(t) : x(t) ——只有在「非输入法合成中」
