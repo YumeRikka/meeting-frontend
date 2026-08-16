@@ -16,6 +16,12 @@
   input:focus { border-color:var(--brand); background:#fff; }
   button { width:100%; padding:13px; font-size:16px; color:#fff; background:var(--brand); border:none; border-radius:9px; margin-top:16px; font-weight:600; }
   button:active { opacity:.85; }
+  button.ghost { background:#fff; color:var(--brand); border:1px solid var(--brand); }
+  button.mini { width:auto; padding:7px 12px; font-size:13px; margin-top:10px; }
+  .row { display:flex; gap:8px; align-items:center; }
+  .row input { flex:1; }
+  .remember { font-size:13px; color:var(--muted); display:flex; align-items:center; gap:6px; margin-top:10px; }
+  .remember input { width:auto; }
   .info { font-size:13px; color:var(--muted); margin-top:12px; line-height:1.7; white-space:pre-wrap; word-break:break-all; }
   .ok { color:var(--brand); }
   .bad { color:var(--danger); }
@@ -23,6 +29,12 @@
   th, td { border:1px solid var(--line); padding:6px 8px; text-align:left; }
   th { background:#fafafa; color:var(--muted); font-weight:500; }
   .codes { font-family:monospace; font-size:14px; line-height:1.8; }
+  .card-row { cursor:pointer; }
+  .card-row:hover { background:#f6fff9; }
+  .detail { display:none; padding:6px 4px 2px; }
+  .detail.open { display:block; }
+  .mc-cancel { width:auto; padding:5px 10px; font-size:12px; margin:0; background:var(--danger); }
+  .go-create { background:var(--brand); }
 </style>
 </head>
 <body>
@@ -31,6 +43,8 @@
     <h1>生成卡密</h1>
     <label>管理员令牌（ADMIN_TOKEN）</label>
     <input id="token" type="password" placeholder="在 .env 中配置的 ADMIN_TOKEN" />
+    <label class="remember"><input type="checkbox" id="remember" /> 记住此密钥（下次自动填入，本机浏览器保存）</label>
+    <button class="mini ghost" id="btn-forget" style="display:none">清除记住的密钥</button>
     <label>生成数量</label>
     <input id="count" type="number" min="1" value="5" />
     <label>每张可用次数（额度）</label>
@@ -48,21 +62,28 @@
   <div class="card hidden" id="list-card">
     <h1>已生成卡密</h1>
     <div class="codes" id="codes-box"></div>
-    <button class="ghost" id="btn-copy" style="background:#fff;color:var(--brand);border:1px solid var(--brand);">复制全部</button>
+    <button class="ghost" id="btn-copy" style="border:1px solid var(--brand);">复制全部</button>
   </div>
 
   <div class="card">
-    <h1>全部卡密</h1>
+    <h1>全部卡密（点击展开会议记录）</h1>
     <button id="btn-list">刷新列表</button>
     <div id="all-list"></div>
+  </div>
+
+  <div class="card">
+    <h1>全部会议记录</h1>
+    <button id="btn-meetings">刷新会议记录</button>
+    <div id="all-meetings"></div>
+  </div>
+
+  <div class="card">
+    <button class="go-create" id="btn-go-create">用管理员密钥去建会 →</button>
   </div>
 </div>
 
 <script>
 const $ = (id) => document.getElementById(id);
-// 后端 API 基地址：默认同源（本地/同域名部署）。
-// 部署到 GitHub Pages 等独立前端时，在同目录新建 config.js 写入：
-//   window.API_BASE = "https://api.rikka.com.cn";
 const API_BASE = (window.API_BASE || "").replace(/\/+$/, "");
 const api = (path, body, isGet) => fetch(API_BASE + path, {
   method: isGet ? "GET" : "POST",
@@ -75,14 +96,48 @@ const api = (path, body, isGet) => fetch(API_BASE + path, {
   return { status: r.status, data };
 });
 
+// 记住密钥：localStorage
+const LS_ADMIN = "mkb_admin_token";
+const LS_PREFILL = "mkb_admin_prefill";
+
+function getToken() { return $("token").value.trim(); }
+
+function persistToken() {
+  if ($("remember").checked) localStorage.setItem(LS_ADMIN, getToken());
+  else localStorage.removeItem(LS_ADMIN);
+  $("btn-forget").style.display = $("remember").checked ? "block" : "none";
+}
+
+// 页面加载：自动回填记住的密钥并刷新列表
+(function restore() {
+  const saved = localStorage.getItem(LS_ADMIN);
+  if (saved) {
+    $("token").value = saved;
+    $("remember").checked = true;
+    $("btn-forget").style.display = "block";
+    loadList();
+    loadAllMeetings();
+  }
+})();
+
+$("btn-forget").onclick = () => {
+  localStorage.removeItem(LS_ADMIN);
+  localStorage.removeItem(LS_PREFILL);
+  $("remember").checked = false;
+  $("btn-forget").style.display = "none";
+  $("token").value = "";
+  $("gen-info").innerHTML = `<span class="ok">已清除记住的密钥</span>`;
+};
+
 $("btn-gen").onclick = async () => {
-  const token = $("token").value.trim();
+  const token = getToken();
   const count = parseInt($("count").value, 10);
   const quota = parseInt($("quota").value, 10);
   const days = $("days").value.trim() ? parseInt($("days").value, 10) : "";
   const note = $("note").value.trim();
   const maxDur = $("max_dur").value.trim() ? parseInt($("max_dur").value, 10) : "";
   if (!token) { $("gen-info").innerHTML = `<span class="bad">请填写管理员令牌</span>`; return; }
+  persistToken();
   $("gen-info").innerHTML = "生成中…";
   const { data } = await api("/api/admin/cards", { token, count, quota, days, note, max_duration_min: maxDur });
   if (!data.ok) {
@@ -102,8 +157,28 @@ $("btn-copy").onclick = () => {
   setTimeout(() => $("btn-copy").textContent = "复制全部", 1500);
 };
 
+// ---------- 工具 ----------
+function pad2(n){ return String(n).padStart(2, "0"); }
+function fmtMc(mc){ return String(mc).replace(/\D/g, "").padStart(9, "0").replace(/(\d{3})(\d{3})(\d{3})/, "$1-$2-$3"); }
+function fmtTime(ts){ if(!ts) return "-"; const d = new Date(ts * 1000); return `${d.getMonth()+1}/${d.getDate()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`; }
+
+function renderMeetings(rows, box, onCancel) {
+  if (!rows || !rows.length) { box.innerHTML = `<div class="info">暂无会议记录</div>`; return; }
+  let html = `<table><tr><th>会议号</th><th>主题</th><th>时间</th><th>账号</th><th>状态</th><th></th></tr>`;
+  rows.forEach(m => {
+    const cancelled = m.status === "cancelled";
+    html += `<tr><td>${fmtMc(m.meeting_code)}</td><td>${m.subject || ""}</td><td>${fmtTime(m.start)}</td><td>${m.account || ""}</td>`
+         +  `<td>${cancelled ? '<span class="bad">已取消</span>' : '<span class="ok">有效</span>'}</td>`
+         +  `<td>${cancelled ? "" : `<button class="mc-cancel" data-mc="${m.meeting_code}">取消</button>`}</td></tr>`;
+  });
+  html += `</table>`;
+  box.innerHTML = html;
+  if (onCancel) box.querySelectorAll(".mc-cancel").forEach(b => b.onclick = () => onCancel(b.dataset.mc));
+}
+
+// ---------- 全部卡密（可展开） ----------
 async function loadList() {
-  const token = $("token").value.trim();
+  const token = getToken();
   if (!token) return;
   const { data } = await api("/api/admin/cards?token=" + encodeURIComponent(token), null, true);
   if (!data.ok) return;
@@ -112,11 +187,57 @@ async function loadList() {
     const exp = c.expires_at ? new Date(c.expires_at * 1000).toLocaleDateString() : "长期";
     const state = c.disabled ? "停用" : (c.expires_at && c.expires_at * 1000 < Date.now() ? "过期" : "有效");
     const maxH = c.max_duration_min ? Math.floor(c.max_duration_min / 60) : 3;
-    return `<tr><td>${c.code}</td><td>${c.used}/${c.quota}</td><td>${exp}</td><td>${maxH}h</td><td>${state}</td><td>${c.note||""}</td></tr>`;
+    return `<tr class="card-row" data-code="${c.code}"><td>${c.code}</td><td>${c.used}/${c.quota}</td><td>${exp}</td><td>${maxH}h</td><td>${state}</td><td>${c.note || ""}</td></tr>`
+         + `<tr class="detail" id="detail-${c.code}"><td colspan="6"><div class="info">载入中…</div></td></tr>`;
   }).join("");
   $("all-list").innerHTML = `<table><tr><th>卡密</th><th>已用/总</th><th>有效期</th><th>单次最长</th><th>状态</th><th>备注</th></tr>${rows}</table>`;
+  $("all-list").querySelectorAll(".card-row").forEach(tr => {
+    tr.onclick = async () => {
+      const code = tr.dataset.code;
+      const dt = $("detail-" + code);
+      if (dt.classList.contains("open")) { dt.classList.remove("open"); return; }
+      document.querySelectorAll(".detail.open").forEach(x => x.classList.remove("open"));
+      dt.classList.add("open");
+      const { data: md } = await api("/api/admin/meetings?token=" + encodeURIComponent(token) + "&code=" + encodeURIComponent(code), null, true);
+      if (!md.ok) { dt.querySelector("td").innerHTML = `<div class="info bad">读取失败</div>`; return; }
+      renderMeetings(md.meetings, dt.querySelector("td"), (mc) => adminCancel(mc, tr));
+    };
+  });
 }
 $("btn-list").onclick = loadList;
+
+// ---------- 全部会议记录 ----------
+async function loadAllMeetings() {
+  const token = getToken();
+  if (!token) return;
+  const { data } = await api("/api/admin/meetings?token=" + encodeURIComponent(token), null, true);
+  if (!data.ok) { $("all-meetings").innerHTML = `<div class="info bad">读取失败（令牌错误？）</div>`; return; }
+  renderMeetings(data.meetings, $("all-meetings"), (mc) => adminCancel(mc));
+}
+$("btn-meetings").onclick = loadAllMeetings;
+
+// 管理员取消：成功后刷新两个视图
+async function adminCancel(mc, tr) {
+  const token = getToken();
+  const { data } = await api("/api/admin/meeting/cancel", { token, meeting_code: mc });
+  if (!data.ok) { alert("取消失败：" + (data.reason || "") + (data.detail ? " " + data.detail : "")); return; }
+  loadAllMeetings();
+  // 刷新展开中的卡密详情
+  document.querySelectorAll(".detail.open").forEach(async dt => {
+    const code = dt.id.replace("detail-", "");
+    const { data: md } = await api("/api/admin/meetings?token=" + encodeURIComponent(token) + "&code=" + encodeURIComponent(code), null, true);
+    if (md.ok) renderMeetings(md.meetings, dt.querySelector("td"), (m) => adminCancel(m, tr));
+  });
+}
+
+// ---------- 用管理员密钥去建会 ----------
+$("btn-go-create").onclick = () => {
+  const token = getToken();
+  if (!token) { alert("请先填写管理员密钥"); return; }
+  persistToken();
+  localStorage.setItem(LS_PREFILL, token);  // 共享给用户端预填（不进 URL）
+  window.location.href = (API_BASE || "") + "/?from=admin";
+};
 </script>
 </body>
 </html>

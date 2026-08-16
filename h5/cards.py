@@ -17,6 +17,7 @@
 
 import os
 import time
+import re
 import random
 import sqlite3
 
@@ -50,6 +51,22 @@ def init_db():
     cols = [r[1] for r in conn.execute("PRAGMA table_info(cards)").fetchall()]
     if "max_duration_min" not in cols:
         conn.execute("ALTER TABLE cards ADD COLUMN max_duration_min INTEGER NOT NULL DEFAULT 180")
+    # 会议记录表：每次成功建会写一条，用于「某卡建了哪些会议」与全局会议历史/取消
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS meetings (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            code          TEXT NOT NULL,
+            meeting_code  TEXT NOT NULL,
+            subject       TEXT,
+            url           TEXT,
+            account       TEXT,
+            host_key      TEXT,
+            start         INTEGER,
+            end           INTEGER,
+            created_at    INTEGER NOT NULL,
+            status        TEXT NOT NULL DEFAULT 'active'
+        )"""
+    )
     conn.commit()
     conn.close()
 
@@ -139,6 +156,43 @@ def list_cards():
     rows = conn.execute("SELECT * FROM cards ORDER BY created_at DESC").fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def record_meeting(code, meeting_code, subject, url, account, host_key, start, end):
+    """建会成功后记录一条会议（code=卡密；管理员密钥开会时记为 ADMIN_TOKEN）。"""
+    init_db()
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO meetings(code, meeting_code, subject, url, account, host_key, start, end, created_at, status) "
+        "VALUES(?,?,?,?,?,?,?,?,?,'active')",
+        (_norm(code), str(meeting_code), subject, url, account, host_key or "",
+         int(start), int(end), int(time.time())),
+    )
+    conn.commit()
+    conn.close()
+
+
+def list_meetings(code=None):
+    """返回会议记录。code 为空=全部；传入卡密=该卡全部。按时间倒序。"""
+    init_db()
+    conn = _conn()
+    if code:
+        rows = conn.execute(
+            "SELECT * FROM meetings WHERE code=? ORDER BY created_at DESC", (_norm(code),)
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM meetings ORDER BY created_at DESC").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def mark_cancelled(meeting_code):
+    """将指定会议号标记为已取消（会议号统一按纯数字归一化）。"""
+    mc = re.sub(r"\D", "", str(meeting_code))
+    conn = _conn()
+    conn.execute("UPDATE meetings SET status='cancelled' WHERE meeting_code=?", (mc,))
+    conn.commit()
+    conn.close()
 
 
 if __name__ == "__main__":

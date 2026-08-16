@@ -122,6 +122,11 @@
       <div class="invite" id="invite-box"></div>
       <button class="ghost copy" id="btn-copy">复制邀请信息</button>
     </div>
+
+    <div class="card hidden" id="my-meetings">
+      <h1>我的会议（可取消）</h1>
+      <div id="my-meetings-list" class="info">载入中…</div>
+    </div>
   </div>
 
   <!-- 取消 -->
@@ -201,10 +206,10 @@ const $ = (id) => document.getElementById(id);
 // 部署到 GitHub Pages 等独立前端时，在同目录新建 config.js 写入：
 //   window.API_BASE = "https://api.yourdomain.com";
 const API_BASE = (window.API_BASE || "").replace(/\/+$/, "");
-const api = (path, body) => fetch(API_BASE + path, {
-  method: "POST",
+const api = (path, body, isGet) => fetch(API_BASE + path, {
+  method: isGet ? "GET" : "POST",
   headers: { "Content-Type": "text/plain" },
-  body: JSON.stringify(body),
+  body: isGet ? undefined : JSON.stringify(body),
 }).then(async r => {
   let d;
   try { d = await r.json(); } catch { d = { ok: false, reason: "http_" + r.status }; }
@@ -331,7 +336,10 @@ function renderCardInfo(data, infoId) {
   const exp = data.expires_at ? new Date(data.expires_at * 1000).toLocaleDateString() : "长期有效";
   const maxMin = data.max_duration_min || 180;
   const maxH = Math.floor(maxMin / 60);
-  $(infoId).innerHTML = `<span class="ok">卡密有效</span><br>剩余次数：<b>${data.remaining}</b> / ${data.quota}　有效期至：<b>${exp}</b><br>单次最长：<b>${maxH} 小时</b>`;
+  const remainTxt = (data.remaining >= 999999) ? "无限" : data.remaining;
+  const quotaTxt = (data.quota >= 999999) ? "无限" : data.quota;
+  const hint = (data.remaining >= 999999) ? "（管理员密钥）" : "";
+  $(infoId).innerHTML = `<span class="ok">卡密有效${hint}</span><br>剩余次数：<b>${remainTxt}</b> / ${quotaTxt}　有效期至：<b>${exp}</b><br>单次最长：<b>${maxH} 小时</b>`;
 }
 
 const CARD_MSG = { not_found:"卡密不存在", disabled:"卡密已停用", expired:"卡密已过期", no_quota:"卡密次数已用完" };
@@ -364,6 +372,7 @@ async function verifyCard(code, opts = {}) {
     $("end").classList.remove("empty"); $("end").querySelector(".ph").textContent = fmtField(endTs);
   }
   formIds.forEach(id => $(id).classList.remove("hidden"));
+  loadMyMeetings(code);  // 展示该卡建的会议（可取消）
   return true;
 }
 
@@ -468,6 +477,38 @@ $("btn-copy").onclick = () => {
   setTimeout(() => $("btn-copy").textContent = "复制邀请信息", 1500);
 };
 
+// ---------- 我的会议（历史 / 取消） ----------
+function fmtMc(mc){ return String(mc).replace(/\D/g, "").padStart(9, "0").replace(/(\d{3})(\d{3})(\d{3})/, "$1-$2-$3"); }
+function fmtTime(ts){ if(!ts) return "-"; const d = new Date(ts * 1000); return `${d.getMonth()+1}/${d.getDate()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`; }
+
+async function loadMyMeetings(code) {
+  if (!code) return;
+  const box = $("my-meetings-list");
+  if (!box) return;
+  const { data } = await api("/api/meetings?code=" + encodeURIComponent(code), null, true);
+  if (!data.ok) { $("my-meetings").classList.add("hidden"); return; }
+  $("my-meetings").classList.remove("hidden");
+  if (!data.meetings.length) { box.innerHTML = `<div class="info">该卡暂无会议记录</div>`; return; }
+  let html = `<table><tr><th>会议号</th><th>主题</th><th>时间</th><th>状态</th><th></th></tr>`;
+  data.meetings.forEach(m => {
+    const cancelled = m.status === "cancelled";
+    html += `<tr><td>${fmtMc(m.meeting_code)}</td><td>${m.subject || ""}</td><td>${fmtTime(m.start)}</td>`
+         +  `<td>${cancelled ? '<span class="bad">已取消</span>' : '<span class="ok">有效</span>'}</td>`
+         +  `<td>${cancelled ? "" : `<button class="mc-cancel" data-mc="${m.meeting_code}">取消</button>`}</td></tr>`;
+  });
+  html += `</table>`;
+  box.innerHTML = html;
+  box.querySelectorAll(".mc-cancel").forEach(b => b.onclick = () => cancelMyMeeting(b.dataset.mc));
+}
+
+async function cancelMyMeeting(mc) {
+  if (!confirm(`确定取消会议 ${fmtMc(mc)}？`)) return;
+  const code = currentCard;
+  const { data } = await api("/api/meeting/cancel", { code, meeting_code: mc });
+  if (!data.ok) { alert("取消失败：" + (data.reason || "") + (data.detail ? " " + data.detail : "")); return; }
+  loadMyMeetings(code);
+}
+
 // ---------- 取消会议 ----------
 $("btn-cancel").onclick = async () => {
   const code = $("c-card").value.trim().toUpperCase();
@@ -519,6 +560,17 @@ $("btn-text-copy").onclick = () => {
   $("btn-text-copy").textContent = "已复制 ✓";
   setTimeout(() => $("btn-text-copy").textContent = "复制邀请信息", 1500);
 };
+
+// ---------- 从管理后台跳转：自动预填管理员密钥 ----------
+(function fromAdmin(){
+  try {
+    const params = new URLSearchParams(location.search);
+    if (params.get("from") === "admin") {
+      const prefill = localStorage.getItem("mkb_admin_prefill");
+      if (prefill) { syncCards(prefill); verifyCard(prefill, { prefillTime: true }); }
+    }
+  } catch(e) {}
+})();
 
 // ---------- PWA：注册 Service Worker ----------
 if ("serviceWorker" in navigator) {

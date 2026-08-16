@@ -75,6 +75,15 @@ def card_verify():
     if request.method == "OPTIONS":
         return "", 204
     code = (_json().get("code") or "").strip().upper()
+    # 管理员密钥：放行作为万能卡，额度/有效期视作无限，时长上限取 ADMIN_MAX_DURATION_MIN
+    if _is_admin_code(code):
+        return jsonify({
+            "ok": True,
+            "remaining": 999999,
+            "quota": 999999,
+            "expires_at": None,
+            "max_duration_min": int(os.getenv("ADMIN_MAX_DURATION_MIN", "1440")),
+        })
     if not cards.exists(code):
         return _err("not_found")
     res = cards.verify(code)
@@ -119,7 +128,15 @@ def _run_create(task_id, code, subject, start, duration):
                                              "details": res.get("details"),
                                              "buffer": res.get("buffer")}})
         return
-    cards.consume(code)
+    # 管理员密钥不扣额度（免额度、免有效期）；其它卡正常消耗一次
+    if not _is_admin_code(code):
+        cards.consume(code)
+    end_ts = start + duration * 60
+    # 记录本次会议（管理员密钥也记录，code 记为 ADMIN_TOKEN，便于全局会议记录里可见）
+    cards.record_meeting(
+        code, res["code"], subject, res["url"], res["account"],
+        res.get("host_key", ""), start, end_ts,
+    )
     invite = {
         "account": res["account"],
         "url": res["url"],
@@ -127,7 +144,7 @@ def _run_create(task_id, code, subject, start, duration):
         "host_key": res.get("host_key", ""),
         "subject": subject,
         "start": start,
-        "end": start + duration * 60,
+        "end": end_ts,
         "duration": duration,
         "buffer": res.get("buffer"),
     }
@@ -153,12 +170,15 @@ def meeting_create():
     if end <= start:
         return _err("invalid_params", detail="结束时间需晚于开始时间")
 
-    v = cards.verify(code)
-    if not v["ok"]:
-        return _err(v["reason"])
-
-    # 按次卡限定时长上限（默认 3 小时）
-    max_min = int(v.get("max_duration_min") or 180)
+    is_admin = _is_admin_code(code)
+    if is_admin:
+        # 管理员密钥：免校验、免额度、免有效期，时长上限由环境变量控制（默认 24 小时）
+        max_min = int(os.getenv("ADMIN_MAX_DURATION_MIN", "1440"))
+    else:
+        v = cards.verify(code)
+        if not v["ok"]:
+            return _err(v["reason"])
+        max_min = int(v.get("max_duration_min") or 180)
     duration = int(round((end - start) / 60))
     if duration <= 0:
         return _err("invalid_params", detail="会议时长需大于 0")
@@ -201,12 +221,15 @@ def meeting_create_from_text():
     start = int(parsed["start"])
     duration = int(parsed["duration"])
 
-    v = cards.verify(code)
-    if not v["ok"]:
-        return _err(v["reason"])
-
-    # 按次卡限定时长上限（默认 3 小时）
-    max_min = int(v.get("max_duration_min") or 180)
+    is_admin = _is_admin_code(code)
+    if is_admin:
+        # 管理员密钥：免校验、免额度、免有效期，时长上限由环境变量控制（默认 24 小时）
+        max_min = int(os.getenv("ADMIN_MAX_DURATION_MIN", "1440"))
+    else:
+        v = cards.verify(code)
+        if not v["ok"]:
+            return _err(v["reason"])
+        max_min = int(v.get("max_duration_min") or 180)
     if duration <= 0:
         return _err("invalid_params", detail="会议时长需大于 0")
     if duration > max_min:
@@ -246,12 +269,9 @@ def meeting_cancel():
     code = (data.get("code") or "").strip().upper()
     meeting_code = (data.get("meeting_code") or "").strip()
 
-    # 取消只需卡密有效（存在/未停用/未过期），不要求仍有额度
-    if not cards.exists(code):
+    # 取消只需卡密存在；管理员密钥（ADMIN_TOKEN）也允许取消自己建的会
+    if not cards.exists(code) and not _is_admin_code(code):
         return _err("not_found")
-    row_ok = cards.verify(code)
-    if not row_ok["ok"] and row_ok["reason"] not in ("no_quota",):
-        return _err(row_ok["reason"])
 
     if not meeting_code:
         return _err("invalid_params")
@@ -271,6 +291,8 @@ def meeting_cancel():
     except Exception as e:
         return _err("cancel_failed", status=500, detail=str(e))
 
+    cards.mark_cancelled(meeting_code)
+
     return jsonify({
         "ok": True,
         "subject": m.get("subject", ""),
@@ -283,6 +305,12 @@ def meeting_cancel():
 def _admin_ok():
     token = _json().get("token") or request.args.get("token") or ""
     return bool(ADMIN_TOKEN) and token == ADMIN_TOKEN
+
+
+def _is_admin_code(code):
+    """管理员密钥：等于 ADMIN_TOKEN 即为真，可作为万能卡开会（免额度/免有效期）。"""
+    code = (code or "").strip().upper()
+    return bool(ADMIN_TOKEN) and code == ADMIN_TOKEN
 
 
 @app.route("/api/admin/cards", methods=["POST", "OPTIONS"])
@@ -324,6 +352,63 @@ def admin_list():
         return _err("forbidden", status=403)
     rows = cards.list_cards()
     return jsonify({"ok": True, "cards": rows})
+
+
+# ---------- 会议记录（历史 / 取消）----------
+@app.route("/api/admin/meetings", methods=["GET"])
+def admin_meetings():
+    if not _admin_ok():
+        return _err("forbidden", status=403)
+    code = (request.args.get("code") or "").strip().upper()
+    rows = cards.list_meetings(code or None)
+    return jsonify({"ok": True, "meetings": rows})
+
+
+@app.route("/api/admin/meeting/cancel", methods=["POST", "OPTIONS"])
+def admin_meeting_cancel():
+    if request.method == "OPTIONS":
+        return "", 204
+    if not _admin_ok():
+        return _err("forbidden", status=403)
+    data = _json()
+    meeting_code = (data.get("meeting_code") or "").strip()
+    if not meeting_code:
+        return _err("invalid_params")
+    try:
+        found = tm.find_meeting_by_code(meeting_code)
+    except Exception as e:
+        return _err("query_failed", status=500, detail=str(e))
+    if not found:
+        return _err("meeting_not_found",
+                    detail="在已配置账号中未找到该会议号，可能已取消/已结束/不属于这些账号")
+    name, uid, m = found
+    try:
+        tm.cancel_meeting(uid, m["meeting_id"])
+    except Exception as e:
+        return _err("cancel_failed", status=500, detail=str(e))
+    cards.mark_cancelled(meeting_code)
+    return jsonify({
+        "ok": True,
+        "subject": m.get("subject", ""),
+        "meeting_code": meeting_code,
+        "account": name,
+    })
+
+
+@app.route("/api/meetings", methods=["GET"])
+def user_meetings():
+    """持卡人查自己这张卡建的会议（卡存在即可，不限状态）。"""
+    code = (request.args.get("code") or "").strip().upper()
+    if not code:
+        return _err("invalid_params", detail="缺少卡密")
+    # 管理员密钥：直接列出其建过的会议（无需在 cards 表中存在）
+    if _is_admin_code(code):
+        rows = cards.list_meetings(code)
+        return jsonify({"ok": True, "meetings": rows})
+    if not cards.exists(code):
+        return _err("not_found")
+    rows = cards.list_meetings(code)
+    return jsonify({"ok": True, "meetings": rows})
 
 
 # ---------- 静态前端 ----------
