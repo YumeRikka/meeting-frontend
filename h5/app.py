@@ -27,6 +27,7 @@ sys.path.insert(0, str(PY))
 
 import cards
 import tencent_meeting as tm
+import parse_meeting
 from dotenv import load_dotenv
 
 # 载入配置：优先 h5/.env，再回退 python/.env（复用腾讯会议凭证与多账号配置）
@@ -35,7 +36,7 @@ load_dotenv(str(BASE / ".env"))
 
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 
-app = Flask(__name__, static_folder=str(BASE / "static"))
+app = Flask(__name__, static_folder=str(BASE / "static"), static_url_path="")
 cards.init_db()
 
 
@@ -167,6 +168,51 @@ def meeting_create():
 
     # 校验通过后立即返回 task_id；真正的建会（驱动浏览器，耗时较长）在后台线程进行，
     # 前端用 /api/meeting/progress 轮询进度，避免请求长时间挂起。
+    task_id = uuid.uuid4().hex
+    with TASK_LOCK:
+        TASKS[task_id] = {"step": 0, "message": "正在准备…", "done": False,
+                          "ok": None, "invite": None, "error": None}
+    threading.Thread(target=_run_create, args=(task_id, code, subject, start, duration),
+                     daemon=True).start()
+    return jsonify({"ok": True, "task_id": task_id})
+
+
+@app.route("/api/meeting/create_from_text", methods=["POST", "OPTIONS"])
+def meeting_create_from_text():
+    """文字建会：粘贴「会议名称/会议时间」文本，复用与微信 bot 一致的解析器。"""
+    if request.method == "OPTIONS":
+        return "", 204
+    data = _json()
+    code = (data.get("code") or "").strip().upper()
+    text = (data.get("text") or "").strip()
+    if not code:
+        return _err("invalid_params", detail="请先验证卡密")
+    if not text:
+        return _err("invalid_params", detail="请粘贴会议信息文本")
+
+    parsed = parse_meeting.parse_meeting_text(text)
+    if parsed is None:
+        return _err("invalid_params", detail="文本为空")
+    if not parsed["time_found"]:
+        return _err("invalid_params",
+                    detail="未识别到会议时间，请按「会议时间：x月x日 HH:MM-HH:MM」格式填写，例如：8月16日 18:00-19:00")
+
+    subject = parsed["subject"]
+    start = int(parsed["start"])
+    duration = int(parsed["duration"])
+
+    v = cards.verify(code)
+    if not v["ok"]:
+        return _err(v["reason"])
+
+    # 按次卡限定时长上限（默认 3 小时）
+    max_min = int(v.get("max_duration_min") or 180)
+    if duration <= 0:
+        return _err("invalid_params", detail="会议时长需大于 0")
+    if duration > max_min:
+        return _err("too_long", status=400, max_min=max_min,
+                    detail=f"会议时长不可超过 {max_min} 分钟（{max_min // 60} 小时）")
+
     task_id = uuid.uuid4().hex
     with TASK_LOCK:
         TASKS[task_id] = {"step": 0, "message": "正在准备…", "done": False,
