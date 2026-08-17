@@ -51,9 +51,9 @@
     <label class="remember"><input type="checkbox" id="remember" /> 记住此密钥（下次自动填入，本机浏览器保存）</label>
     <button class="mini ghost" id="btn-forget" style="display:none">清除记住的密钥</button>
     <label>生成数量</label>
-    <input id="count" type="number" min="1" value="5" />
+    <input id="count" type="number" min="1" value="1" />
     <label>每张可用次数（额度）</label>
-    <input id="quota" type="number" min="1" value="1" />
+    <input id="quota" type="number" min="1" value="10" />
     <label>有效期（天，留空=长期）</label>
     <input id="days" type="number" min="1" placeholder="如 30" />
     <label>备注（可选）</label>
@@ -108,6 +108,16 @@ const LS_ADMIN = "mkb_admin_token";
 const LS_PREFILL = "mkb_admin_prefill";
 
 function getToken() { return $("token").value.trim(); }
+
+// 输入令牌后自动加载卡密列表（含删除按钮），免去手动点「刷新列表」
+let _tokenTimer = null;
+$("token").addEventListener("input", () => {
+  const t = getToken();
+  if (t.length >= 6) {
+    clearTimeout(_tokenTimer);
+    _tokenTimer = setTimeout(loadList, 600);
+  }
+});
 
 function persistToken() {
   if ($("remember").checked) localStorage.setItem(LS_ADMIN, getToken());
