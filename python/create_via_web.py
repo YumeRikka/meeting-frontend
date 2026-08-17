@@ -467,11 +467,15 @@ def _set_time(sched, start_ts, end_ts, on_progress=None):
         on_progress(4, PROGRESS_STEPS[4])
 
     now = int(time.time())
+    MIN_DURATION = 15 * 60  # 腾讯会议最短会议时长 15 分钟
     # 兜底：不允许开始时间早于当前（腾讯会报「时间不能早于当前时间」）
     if int(start_ts) <= now:
         start_ts = now + 60
+    # 结束必须晚于开始，且时长不低于腾讯下限 15 分钟
     if int(end_ts) <= int(start_ts):
-        end_ts = int(start_ts) + 60
+        end_ts = int(start_ts) + MIN_DURATION
+    elif int(end_ts) - int(start_ts) < MIN_DURATION:
+        end_ts = int(start_ts) + MIN_DURATION
 
     start_dt = datetime.fromtimestamp(int(start_ts))
     end_dt = datetime.fromtimestamp(int(end_ts))

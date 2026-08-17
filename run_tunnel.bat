@@ -1,7 +1,7 @@
 @echo off
-REM 启动 Cloudflare Tunnel：将 api.rikka.com.cn 暴露到本机 localhost:5000
-REM 前提：本机 Flask 后端已在 5000 端口运行（用 run_web.bat 启动）
-REM 保持此窗口打开 = 隧道运行中；关闭窗口 = 停止隧道。
+REM Start Cloudflare Tunnel: expose api.rikka.com.cn to localhost:5000
+REM Prereq: Flask backend must be running on port 5000 (use run_web.bat first)
+REM Keep this window open = tunnel running; close window = tunnel stopped.
 title Cloudflare Tunnel (meeting-api)
 "C:\Program Files (x86)\cloudflared\cloudflared.exe" tunnel run meeting-api
 pause

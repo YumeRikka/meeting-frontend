@@ -340,6 +340,7 @@ def create_meeting(subject, start_ts, duration_min, host_userid):
         raise RuntimeError("缺少腾讯会议凭证，请检查 .env")
     if not host_userid:
         raise RuntimeError("缺少会议账号 userid")
+    duration_min = normalize_duration_min(duration_min)
     return _raw_create(subject, start_ts, duration_min, host_userid)
 
 
@@ -350,6 +351,14 @@ def _is_hard_input_error(e):
     keys = ("校验", "全为空格", "会议主题", "停留", "校验错误", "格式不正确",
             "必填", "不能为空", "invalid", "格式", "长度", "still")
     return any(k in s for k in keys)
+
+
+MIN_MEETING_DURATION_MIN = 15  # 腾讯会议最短会议时长（分钟）
+
+
+def normalize_duration_min(duration_min):
+    """会议时长兜底：腾讯会议要求最少 15 分钟，低于此值表单/接口会拒绝。"""
+    return max(int(duration_min or 0), MIN_MEETING_DURATION_MIN)
 
 
 def create_meeting_smart(subject, start_ts, duration_min, prefer="web", on_progress=None):
@@ -368,6 +377,9 @@ def create_meeting_smart(subject, start_ts, duration_min, prefer="web", on_progr
     candidates = get_candidate_accounts()
     if not candidates:
         raise RuntimeError("未配置任何会议账号（MEETING_ACCOUNTS / MEETING_USERIDS / MEETING_USERID）")
+
+    # 腾讯会议最短会议时长 15 分钟，低于此值表单/接口会拒绝，统一兜底到下限
+    duration_min = normalize_duration_min(duration_min)
 
     buf = CONFLICT_BUFFER
     end_ts = start_ts + duration_min * 60

@@ -1,10 +1,10 @@
 @echo off
-REM 会议卡密后端 · 回归测试套件（零依赖，使用 Python 内置 unittest）
-REM 用法：双击本文件，或 cmd 中执行 run_tests.bat
+REM Meeting-card backend regression suite (zero-dependency, Python built-in unittest)
+REM Usage: double-click this file, or run run_tests.bat from cmd
 cd /d %~dp0
 call .venv\Scripts\activate.bat
 if errorlevel 1 (
-    echo [错误] 未找到 .venv，请先创建 Python 3.13 虚拟环境并安装 requirements.txt
+    echo [ERROR] .venv not found. Create the Python 3.13 venv and install requirements.txt first.
     pause
     exit /b 1
 )
