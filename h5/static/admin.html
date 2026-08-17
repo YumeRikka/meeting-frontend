@@ -34,7 +34,12 @@
   .detail { display:none; padding:6px 4px 2px; }
   .detail.open { display:block; }
   .mc-cancel { width:auto; padding:5px 10px; font-size:12px; margin:0; background:var(--danger); }
+  .mc-del { width:auto; padding:5px 10px; font-size:12px; margin:0; background:var(--danger); }
   .go-create { background:var(--brand); }
+  .pager { display:flex; gap:8px; align-items:center; justify-content:center; margin-top:10px; font-size:13px; color:var(--muted); }
+  .pager .pg { width:auto; margin:0; padding:6px 14px; font-size:13px; background:#fff; color:var(--brand); border:1px solid var(--line); border-radius:8px; font-weight:500; }
+  .pager .pg:disabled { color:#bbb; border-color:#eee; background:#fafafa; cursor:default; }
+  .pager .pg-info { min-width:120px; text-align:center; }
 </style>
 </head>
 <body>
@@ -69,12 +74,14 @@
     <h1>全部卡密（点击展开会议记录）</h1>
     <button id="btn-list">刷新列表</button>
     <div id="all-list"></div>
+    <div class="pager" id="cards-pager"></div>
   </div>
 
   <div class="card">
     <h1>全部会议记录</h1>
     <button id="btn-meetings">刷新会议记录</button>
     <div id="all-meetings"></div>
+    <div class="pager" id="meetings-pager"></div>
   </div>
 
   <div class="card">
@@ -176,23 +183,51 @@ function renderMeetings(rows, box, onCancel) {
   if (onCancel) box.querySelectorAll(".mc-cancel").forEach(b => b.onclick = () => onCancel(b.dataset.mc));
 }
 
-// ---------- 全部卡密（可展开） ----------
+// ---------- 分页状态 ----------
+const PAGE = 15;
+let allCards = [], cardsPage = 0;
+let allMeetings = [], meetingsPage = 0;
+
+function renderPager(box, total, page, onPage) {
+  const pages = Math.max(1, Math.ceil(total / PAGE));
+  if (pages <= 1) { box.innerHTML = ""; return; }
+  box.innerHTML =
+    `<button class="pg" data-p="${page - 1}" ${page <= 0 ? "disabled" : ""}>上一页</button>` +
+    `<span class="pg-info">第 ${page + 1} / ${pages} 页（共 ${total} 条）</span>` +
+    `<button class="pg" data-p="${page + 1}" ${page >= pages - 1 ? "disabled" : ""}>下一页</button>`;
+  box.querySelectorAll(".pg").forEach(b => {
+    b.onclick = () => { const p = parseInt(b.dataset.p, 10); if (!isNaN(p)) onPage(p); };
+  });
+}
+
+// ---------- 全部卡密（可展开 + 删除 + 分页） ----------
 async function loadList() {
   const token = getToken();
   if (!token) return;
   const { data } = await api("/api/admin/cards?token=" + encodeURIComponent(token), null, true);
   if (!data.ok) return;
-  if (!data.cards.length) { $("all-list").innerHTML = `<div class="info">暂无卡密</div>`; return; }
-  const rows = data.cards.map(c => {
+  allCards = data.cards || [];
+  cardsPage = 0;
+  renderCardsPage();
+}
+$("btn-list").onclick = loadList;
+
+function renderCardsPage() {
+  const token = getToken();
+  if (!allCards.length) { $("all-list").innerHTML = `<div class="info">暂无卡密</div>`; $("cards-pager").innerHTML = ""; return; }
+  const slice = allCards.slice(cardsPage * PAGE, cardsPage * PAGE + PAGE);
+  const rows = slice.map(c => {
     const exp = c.expires_at ? new Date(c.expires_at * 1000).toLocaleDateString() : "长期";
     const state = c.disabled ? "停用" : (c.expires_at && c.expires_at * 1000 < Date.now() ? "过期" : "有效");
     const maxH = c.max_duration_min ? Math.floor(c.max_duration_min / 60) : 3;
-    return `<tr class="card-row" data-code="${c.code}"><td>${c.code}</td><td>${c.used}/${c.quota}</td><td>${exp}</td><td>${maxH}h</td><td>${state}</td><td>${c.note || ""}</td></tr>`
-         + `<tr class="detail" id="detail-${c.code}"><td colspan="6"><div class="info">载入中…</div></td></tr>`;
+    return `<tr class="card-row" data-code="${c.code}"><td>${c.code}</td><td>${c.used}/${c.quota}</td><td>${exp}</td><td>${maxH}h</td><td>${state}</td><td>${c.note || ""}</td>`
+         + `<td><button class="mc-del" data-code="${c.code}">删除</button></td></tr>`
+         + `<tr class="detail" id="detail-${c.code}"><td colspan="7"><div class="info">载入中…</div></td></tr>`;
   }).join("");
-  $("all-list").innerHTML = `<table><tr><th>卡密</th><th>已用/总</th><th>有效期</th><th>单次最长</th><th>状态</th><th>备注</th></tr>${rows}</table>`;
+  $("all-list").innerHTML = `<table><tr><th>卡密</th><th>已用/总</th><th>有效期</th><th>单次最长</th><th>状态</th><th>备注</th><th>操作</th></tr>${rows}</table>`;
   $("all-list").querySelectorAll(".card-row").forEach(tr => {
-    tr.onclick = async () => {
+    tr.onclick = async (e) => {
+      if (e.target.classList.contains("mc-del")) return;   // 点「删除」不触发展开
       const code = tr.dataset.code;
       const dt = $("detail-" + code);
       if (dt.classList.contains("open")) { dt.classList.remove("open"); return; }
@@ -203,18 +238,37 @@ async function loadList() {
       renderMeetings(md.meetings, dt.querySelector("td"), (mc) => adminCancel(mc, tr));
     };
   });
+  $("all-list").querySelectorAll(".mc-del").forEach(b => {
+    b.onclick = (e) => { e.stopPropagation(); deleteCard(b.dataset.code); };
+  });
+  renderPager($("cards-pager"), allCards.length, cardsPage, (p) => { cardsPage = p; renderCardsPage(); });
 }
-$("btn-list").onclick = loadList;
 
-// ---------- 全部会议记录 ----------
+async function deleteCard(code) {
+  if (!confirm(`确定删除卡密 ${code}？删除后该卡密失效（已建会议记录仍保留在「全部会议记录」中）。`)) return;
+  const token = getToken();
+  const { data } = await api("/api/admin/card/delete", { token, code });
+  if (!data.ok) { alert("删除失败：" + (data.reason || "") + (data.detail ? " " + data.detail : "")); return; }
+  loadList();   // 重新载入并回到首页
+}
+
+// ---------- 全部会议记录（分页） ----------
 async function loadAllMeetings() {
   const token = getToken();
   if (!token) return;
   const { data } = await api("/api/admin/meetings?token=" + encodeURIComponent(token), null, true);
-  if (!data.ok) { $("all-meetings").innerHTML = `<div class="info bad">读取失败（令牌错误？）</div>`; return; }
-  renderMeetings(data.meetings, $("all-meetings"), (mc) => adminCancel(mc));
+  if (!data.ok) { $("all-meetings").innerHTML = `<div class="info bad">读取失败（令牌错误？）</div>`; $("meetings-pager").innerHTML = ""; return; }
+  allMeetings = data.meetings || [];
+  meetingsPage = 0;
+  renderMeetingsPage();
 }
 $("btn-meetings").onclick = loadAllMeetings;
+
+function renderMeetingsPage() {
+  const slice = allMeetings.slice(meetingsPage * PAGE, meetingsPage * PAGE + PAGE);
+  renderMeetings(slice, $("all-meetings"), (mc) => adminCancel(mc));
+  renderPager($("meetings-pager"), allMeetings.length, meetingsPage, (p) => { meetingsPage = p; renderMeetingsPage(); });
+}
 
 // 管理员取消：成功后刷新两个视图
 async function adminCancel(mc, tr) {

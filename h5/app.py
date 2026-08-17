@@ -34,7 +34,7 @@ from dotenv import load_dotenv
 load_dotenv(str(PY / ".env"))
 load_dotenv(str(BASE / ".env"))
 
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
 
 app = Flask(__name__, static_folder=str(BASE / "static"), static_url_path="")
 cards.init_db()
@@ -308,9 +308,10 @@ def _admin_ok():
 
 
 def _is_admin_code(code):
-    """管理员密钥：等于 ADMIN_TOKEN 即为真，可作为万能卡开会（免额度/免有效期）。"""
+    """管理员密钥：等于 ADMIN_TOKEN 即为真，可作为万能卡开会（免额度/免有效期）。
+    大小写不敏感：传入 code 与 ADMIN_TOKEN 均转大写比对，避免令牌含小写字母时永远匹配不上。"""
     code = (code or "").strip().upper()
-    return bool(ADMIN_TOKEN) and code == ADMIN_TOKEN
+    return bool(ADMIN_TOKEN) and code == ADMIN_TOKEN.upper()
 
 
 @app.route("/api/admin/cards", methods=["POST", "OPTIONS"])
@@ -352,6 +353,21 @@ def admin_list():
         return _err("forbidden", status=403)
     rows = cards.list_cards()
     return jsonify({"ok": True, "cards": rows})
+
+
+@app.route("/api/admin/card/delete", methods=["POST", "OPTIONS"])
+def admin_delete_card():
+    if request.method == "OPTIONS":
+        return "", 204
+    if not _admin_ok():
+        return _err("forbidden", status=403)
+    data = _json()
+    code = (data.get("code") or "").strip().upper()
+    if not code:
+        return _err("invalid_params", detail="缺少卡密")
+    if cards.delete_card(code):
+        return jsonify({"ok": True})
+    return _err("not_found", detail="卡密不存在")
 
 
 # ---------- 会议记录（历史 / 取消）----------

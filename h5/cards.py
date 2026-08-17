@@ -158,6 +158,19 @@ def list_cards():
     return [dict(r) for r in rows]
 
 
+def delete_card(code):
+    """删除指定卡密（同时会清除其会议记录里对该卡密的直接关联不破坏历史，
+    因为 meetings.code 仅作文本归档，删除卡不影响全局会议记录展示）。
+    返回 True/False（False 表示卡密不存在）。"""
+    code = _norm(code)
+    conn = _conn()
+    cur = conn.execute("DELETE FROM cards WHERE code=?", (code,))
+    changed = cur.rowcount
+    conn.commit()
+    conn.close()
+    return changed > 0
+
+
 def record_meeting(code, meeting_code, subject, url, account, host_key, start, end):
     """建会成功后记录一条会议（code=卡密；管理员密钥开会时记为 ADMIN_TOKEN）。"""
     init_db()
