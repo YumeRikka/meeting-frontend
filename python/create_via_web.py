@@ -218,6 +218,41 @@ def _open_scheduler(ctx, page):
     return sched
 
 
+def _is_login_page(page):
+    """精确判定当前是否处于腾讯会议『登录页』。
+
+    历史坑：之前用 `bool(page.query_selector("input[type=password]"))` 判断登录失效，
+    但『预定会议』表单页本身就带一个「会议密码」输入框（type=password），导致即使已登录
+    也会被误判为「登录态已失效」。这里改用登录页的强特征来判定，避免误杀：
+      - URL 为登录/通行证路径（/login、passport、sign-in）
+      - 存在账号输入框（手机号/邮箱/微信/QQ 登录）
+      - 存在「扫码登录 / 二维码登录」入口
+    只要命中其一即视为登录页；否则视为已登录（即便页面上有会议密码框）。
+    """
+    try:
+        url = (page.url or "").lower()
+        if "/login" in url or "passport" in url or "sign-in" in url:
+            return True
+        # 会议密码框也是 type=password，但绝不会和「账号登录输入框」共存于同一页。
+        has_account_field = bool(page.query_selector(
+            'input[name="account"], input[name="u"], input[name="phone"], '
+            'input[placeholder*="手机号"], input[placeholder*="邮箱"], '
+            'input[placeholder*="账号"], input[placeholder*="微信"], input[placeholder*="QQ"]'
+        ))
+        if has_account_field:
+            return True
+        try:
+            has_qr = bool(page.get_by_text("扫码登录", exact=False).first.count()) or \
+                bool(page.get_by_text("二维码登录", exact=False).first.count())
+        except Exception:
+            has_qr = False
+        if has_qr:
+            return True
+        return False
+    except Exception:
+        return False
+
+
 # ---------- 一次性交互登录 ----------
 def login_once(userid, account=None, password=None, headless=False, qr=False):
     """打开可见浏览器完成登录，保存登录态到 profiles/{userid}/（持久化，之后建会复用，不再请求验证码）。
@@ -767,7 +802,7 @@ def _create_meeting_sync(userid, subject, start_ts, end_ts, host_key="", headles
             # 走到这里说明已过 _open_scheduler 的登录态检测，通常是页面加载慢（尤其 NAS 冷启动）；
             # 若实际是登录态失效跳转到了登录页，给出明确提示。
             try:
-                on_login_page = bool(page.query_selector("input[type=password]")) or "login" in (page.url or "").lower()
+                on_login_page = _is_login_page(page)
             except Exception:
                 on_login_page = False
             if on_login_page:
