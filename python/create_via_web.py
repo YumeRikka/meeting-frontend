@@ -658,16 +658,51 @@ def _scrape_result(page):
 
 
 def create_meeting(userid, subject, start_ts, end_ts, host_key="", headless=True, on_progress=None):
-    """登录指定账号并创建会议，返回 {"code","url","host_key"}。
-    复用 profiles/{userid}/ 持久化登录态（首次需 --login）。登录态失效会提示重新登录。
-    on_progress(index, message=None): 进度回调，index 对应 PROGRESS_STEPS。"""
+    """对外入口：在独立的干净线程里跑 playwright 建会，彻底杜绝
+    「同一线程反复 sync_playwright().start() 触发 asyncio 事件循环泄漏」的报错
+    （It looks like you are using Playwright Sync API inside the asyncio loop）。
+
+    背景：create_meeting_smart 会在同一个 worker 线程里串行换号重试 5 个账号；
+    旧实现依赖 _reset_thread_event_loop() 清当前线程的 loop，但账号因登录过期等异常
+    中断后，loop 常常清不干净，下一个账号一进来就误报「Sync API inside the asyncio loop」。
+    现在每次调用都新建一个线程，线程结束时其事件循环随之消亡，账号之间零共享、零污染。"""
+    import threading
     _require_pw()
     profile = PROFILE_DIR / userid
     if not profile.exists():
         raise RuntimeError(f"账号 {userid} 尚未登录，请先运行：python create_via_web.py --login {userid}")
-
     if on_progress:
         on_progress(0, PROGRESS_STEPS[0])
+
+    box, err = {}, {}
+
+    def _worker():
+        try:
+            # 本线程从未跑过 playwright，天生无残留 loop；再显式清一遍双保险
+            try:
+                asyncio.set_event_loop(None)
+            except Exception:
+                pass
+            box["v"] = _create_meeting_sync(
+                userid, subject, start_ts, end_ts, host_key=host_key,
+                headless=headless, on_progress=on_progress,
+            )
+        except Exception as e:  # noqa: BLE001
+            err["e"] = e
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    t.join()
+    if "e" in err:
+        raise err["e"]
+    return box["v"]
+
+
+def _create_meeting_sync(userid, subject, start_ts, end_ts, host_key="", headless=True, on_progress=None):
+    """建会核心逻辑（同步，在 create_meeting 的独立线程中执行）。"""
+    profile = PROFILE_DIR / userid
+    if not profile.exists():
+        raise RuntimeError(f"账号 {userid} 尚未登录，请先运行：python create_via_web.py --login {userid}")
 
     with _nonblocking_playwright() as p:
         ctx = p.chromium.launch_persistent_context(str(profile), headless=headless, args=CHROME_ARGS)

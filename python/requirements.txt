@@ -1,3 +1,3 @@
-wxauto4
-requests
-python-dotenv
+# 已废弃：微信机器人（meeting_bot.py）功能已暂移除，无需 wxauto4。
+# 后端 Web 依赖请看项目根 requirements.txt（flask/playwright/requests/dotenv）。
+# 若未来恢复 bot，请注意 wxauto4 仅支持到 Python 3.12，需另建 3.12 环境。

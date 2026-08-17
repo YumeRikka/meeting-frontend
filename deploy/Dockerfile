@@ -1,6 +1,6 @@
 # 会议卡密后端 · Docker 镜像（x86_64 / amd64）
 # 基于官方 python:slim，自行安装 Playwright Chromium 与首次登录用的虚拟桌面(VNC)
-FROM python:3.11-slim
+FROM python:3.13-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Python 依赖（不含 wxauto4 —— 那是 Windows 微信机器人用的，后端不需要）
-COPY deploy/requirements.txt ./requirements.txt
+COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 安装 Playwright Chromium 浏览器及系统依赖

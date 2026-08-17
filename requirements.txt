@@ -1,0 +1,6 @@
+# 会议卡密后端 · Web 端唯一依赖真相源（锁版本，禁止用 >=）
+# 运行方式：run_web.bat（自动激活 .venv 并安装本文件）
+flask==3.1.3
+python-dotenv==1.2.2
+requests==2.34.2
+playwright==1.62.0

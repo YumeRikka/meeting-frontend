@@ -11,6 +11,8 @@ python/cookies/
 
 # 临时 / 调试文件
 **/__pycache__/
+*.log
+debug.log
 *.db
 **/inspect_*
 **/smoke_*
