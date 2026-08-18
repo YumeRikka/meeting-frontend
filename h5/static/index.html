@@ -329,7 +329,7 @@ const LS_CARD = "mkb_card_v1";
 function saveCard(code){ try { localStorage.setItem(LS_CARD, code); } catch(e){} }
 function loadCard(){ try { return localStorage.getItem(LS_CARD) || ""; } catch(e){ return ""; } }
 function clearCard(){ try { localStorage.removeItem(LS_CARD); } catch(e){} }
-function syncCards(code){ $("card").value = code; $("c-card").value = code; }
+function syncCards(code){ $("card").value = code; $("c-card").value = code; $("t-card").value = code; }
 
 function renderCardInfo(data, infoId) {
   infoId = infoId || "card-info";
@@ -383,20 +383,23 @@ $("btn-verify").onclick = async () => {
 // 清除已保存卡密（共用设备 / 换卡时使用）
 $("btn-clear").onclick = () => {
   clearCard();
-  $("card").value = ""; $("c-card").value = "";
+  $("card").value = ""; $("c-card").value = ""; $("t-card").value = "";
   currentCard = "";
   $("btn-clear").style.display = "none";
   $("create-form").classList.add("hidden");
   $("create-result").classList.add("hidden");
-  $("card-info").innerHTML = "";
+  $("text-form").classList.add("hidden");
+  $("text-result").classList.add("hidden");
+  $("card-info").innerHTML = ""; $("t-card-info").innerHTML = "";
 };
 
-// 页面加载：若已记住卡密，自动回填并校验（免去重复输入）
+// 页面加载：若已记住卡密，自动回填并校验（三个 tab 共用同一张卡，免去重复输入）
 (function autoRestore(){
   const saved = loadCard();
   if (saved) {
     syncCards(saved);
-    verifyCard(saved, { prefillTime: true });
+    verifyCard(saved, { prefillTime: true });                                                    // 创建会议 tab
+    verifyCard(saved, { prefillTime: false, infoId: "t-card-info", formIds: ["text-form"] });    // 文字建会 tab 同样记住卡密
   }
 })();
 
