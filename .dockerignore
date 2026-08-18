@@ -1,0 +1,19 @@
+# 项目根 .dockerignore（build context 是项目根，此文件必须在此处才生效）
+# 防止把 .git / .venv / 凭证 / 卡密库 / 登录态打进镜像上下文
+.git
+.workbuddy
+.venv
+**/__pycache__
+python/profiles
+python/accounts.json
+python/.env
+python/cookies
+python/*.db
+h5/*.db
+**/inspect_*
+**/smoke_*
+**/test_*
+python/imp_err.txt
+python/smoke_out.txt
+deploy/config
+deploy/data

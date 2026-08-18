@@ -31,17 +31,17 @@ api.yourdomain.com  →  容器内部 localhost:5000
 
 ## 1. 把项目放到 NAS
 
-方式 A（推荐）：在 NAS 上 `git clone` 你的仓库到 `/mnt/media/meeting-bot/`。  
+方式 A（推荐，前提：本地提交已 `git push`）：在 NAS 上 `git clone` 你的仓库到 `<NAS_PROJECT_DIR>/`（若本地还有未推送提交，改用方式 B，否则会拿到缺修复的旧代码）。  
 方式 B：用 极空间 File Station / SCP 把整个 `meeting-bot` 目录传上去。
 
-最终假设路径为 `/mnt/media/meeting-bot/`。
+最终假设路径为 `<NAS_PROJECT_DIR>/`。
 
 ---
 
 ## 2. 放凭证（一次性）
 
 ```bash
-cd /mnt/media/meeting-bot
+cd <NAS_PROJECT_DIR>
 mkdir -p deploy/config deploy/data
 cp /你本机/meeting-bot/python/accounts.json deploy/config/accounts.json
 cp /你本机/meeting-bot/python/.env           deploy/config/.env
@@ -54,7 +54,7 @@ cp /你本机/meeting-bot/python/.env           deploy/config/.env
 ## 3. 构建并运行（无头建会）
 
 ```bash
-cd /mnt/media/meeting-bot/deploy
+cd <NAS_PROJECT_DIR>/deploy
 docker compose build
 docker compose up -d
 ```

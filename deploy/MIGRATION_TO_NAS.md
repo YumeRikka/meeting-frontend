@@ -127,7 +127,7 @@ chmod 600 deploy/config/.env
 
 ```bash
 cd <NAS_PROJECT_DIR>/deploy
-docker compose build          # 首次构建会下载 python:3.11-slim + 装 Playwright Chromium，较慢
+docker compose build          # 首次构建会下载 python:3.13-slim + 装 Playwright Chromium，较慢
 docker compose up -d
 ```
 
@@ -235,6 +235,8 @@ docker logs -f meeting-bot
 ---
 
 ## 8. 微信群机器人（wxauto）的处理
+
+> 当前版本已移除微信机器人（`meeting_bot.py` 已弃用，详见项目根 `python/requirements.txt` 标注），**本节仅供未来若恢复时参考，现在迁移无需任何微信机器人相关操作**。
 
 `meeting_bot.py` 依赖 **Windows 上已登录的微信 PC + wxauto4 库**，这套**无法在 Linux/NAS 跑**，所以：
 

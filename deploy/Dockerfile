@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xvfb x11vnc novnc \
     && rm -rf /var/lib/apt/lists/*
 
-# Python 依赖（不含 wxauto4 —— 那是 Windows 微信机器人用的，后端不需要）
+# Web 后端依赖：COPY 的是项目根 requirements.txt（与本地 .venv 同一份锁版本真相源）
 COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 

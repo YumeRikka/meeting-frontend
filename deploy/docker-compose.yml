@@ -13,6 +13,8 @@ services:
       - PORT=5000
       - CARDS_DB=/app/data/cards.db
       - DISPLAY=:99
+    env_file:
+      - ./config/.env
     volumes:
       # 凭证（从你本机 python/accounts.json、python/.env 拷过来，见 README）
       - ./config/accounts.json:/app/python/accounts.json:ro

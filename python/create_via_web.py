@@ -31,6 +31,15 @@ COOKIE_DIR = BASE / "cookies"          # 仅作「已登录」标记文件，真
 COOKIE_DIR.mkdir(exist_ok=True)
 PROFILE_DIR = BASE / "profiles"        # 每个账号一个持久化浏览器目录
 PROFILE_DIR.mkdir(exist_ok=True)
+
+# 让本文件被单独执行（如 `docker exec ... python create_via_web.py --login xxx`）时
+# 也能读到 /app/python/.env 里的腾讯会议 REST 凭证，否则建会会在凭证检查处失败。
+try:
+    from dotenv import load_dotenv
+    load_dotenv(str(BASE / ".env"))
+except ImportError:
+    pass
+
 WEB_URL = "https://meeting.tencent.com/"
 
 # 无头 Chromium 在容器/受限环境下常因沙箱、/dev/shm 或 GPU 崩溃，统一加这些启动参数

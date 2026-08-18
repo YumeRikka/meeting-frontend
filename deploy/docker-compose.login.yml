@@ -13,6 +13,8 @@ services:
     environment:
       - CARDS_DB=/app/data/cards.db
       - DISPLAY=:99
+    env_file:
+      - ./config/.env
     volumes:
       - ./config/accounts.json:/app/python/accounts.json:ro
       - ./config/.env:/app/python/.env:ro
