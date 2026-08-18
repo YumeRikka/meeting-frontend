@@ -9,7 +9,12 @@ import base64
 import json
 import requests
 from pathlib import Path
+import logging
 from dotenv import load_dotenv
+
+# 模块日志器：app.py 已配置 root logger（控制台+文件双写），
+# 这里用子 logger 自动继承，预检/选账号等关键节点都会落盘到 app.log。
+_log = logging.getLogger("tm")
 
 # .env 锁定到脚本所在目录，无论从哪个目录启动都能读到
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -27,7 +32,9 @@ REST_TIMEOUT = int(os.getenv("REST_TIMEOUT", "5"))
 # 反查总时限（秒）：网页建会后用 REST 拿会议号/链接，到期立即返回 ''，绝不「一直查」。
 LOOKUP_TIMEOUT = int(os.getenv("LOOKUP_TIMEOUT", "10"))
 # 冲突预检总时限（秒）：查每个账号会议列表的累计上限，到期降级为尽力而为。
-PRECHECK_TIMEOUT = int(os.getenv("PRECHECK_TIMEOUT", "6"))
+# 默认 10s 可覆盖 5 个账号在 REST 可用时的完整预检；若 REST 接口不可用（如生产出口 IP 未加腾讯开放平台白名单），
+# 预检必然失败并降级为「按序尝试」，此时与时限无关——需先开通 IP 白名单才能让预检生效。
+PRECHECK_TIMEOUT = int(os.getenv("PRECHECK_TIMEOUT", "10"))
 
 HOST = "api.meeting.qq.com"
 URI = "/v1/meetings"
@@ -190,9 +197,11 @@ def _overlaps(start_ts, end_ts, buf, m):
 
 def find_free_account(candidates, start_ts, end_ts, buf, deadline=None):
     """遍历候选账号，返回 (free_name, free_uid, details, status)。
+    扫完所有账号再挑第一个无冲突的（而非遇到空闲立即返回），保证 details 完整，
+    便于上层日志展示每个账号状态、并让兜底只追加「确空闲/未知」账号。
     details: {name: {"userid":.., "conflicts":[会议...], "error":..或None}}。
     status:
-      "free"         -> 找到第一个无冲突账号（free_name 即其名）
+      "free"         -> 找到第一个无冲突账号（free_name 即其名）；details 含全部账号状态
       "query_failed" -> 所有账号的会议列表查询均失败（REST 不可用），退化为尽力而为：
                         返回第一个查询失败的账号，交由上层走网页建会
                         （网页建会本身可用，真实时段冲突由腾讯侧兜底）
@@ -201,6 +210,7 @@ def find_free_account(candidates, start_ts, end_ts, buf, deadline=None):
     """
     details = {}
     query_failed = []  # 查询失败的账号（REST 不可用），按顺序记录
+    first_free = None  # 第一个确空闲的账号
     for name, uid in candidates:
         try:
             meetings = get_meetings(uid, deadline=deadline)
@@ -210,8 +220,10 @@ def find_free_account(candidates, start_ts, end_ts, buf, deadline=None):
             continue
         conflicts = [m for m in meetings if _overlaps(start_ts, end_ts, buf, m)]
         details[name] = {"userid": uid, "conflicts": conflicts, "error": None}
-        if not conflicts:
-            return name, uid, details, "free"
+        if not conflicts and first_free is None:
+            first_free = (name, uid)
+    if first_free:
+        return first_free[0], first_free[1], details, "free"
     # 没有「确认空闲」的账号：若至少有人是查询失败（非真实冲突），降级为尽力而为
     if query_failed:
         n, u = query_failed[0]
@@ -361,6 +373,38 @@ def normalize_duration_min(duration_min):
     return max(int(duration_min or 0), MIN_MEETING_DURATION_MIN)
 
 
+def _fmt_meeting(m):
+    """把会议列表项压缩成一行可读文本，便于日志展示冲突来源。"""
+    subj = m.get("subject") or ""
+    try:
+        s = time.strftime("%m-%d %H:%M", time.localtime(int(m.get("start_time") or 0)))
+        e = time.strftime("%m-%d %H:%M", time.localtime(int(m.get("end_time") or 0)))
+    except (TypeError, ValueError):
+        s = e = "?"
+    code = m.get("meeting_code", "")
+    return f"{subj}({code}) {s}–{e}"
+
+
+def log_precheck(details, status, free_name, free_uid):
+    """把冲突预检结果打到日志：每个账号是空闲 / 冲突（哪些会）/ 查询失败，以及最终选定谁。"""
+    lines = []
+    for name, info in details.items():
+        if info.get("error"):
+            lines.append(f"  - {name}: 查询失败({info['error']})")
+        elif info.get("conflicts"):
+            cs = "; ".join(_fmt_meeting(m) for m in info["conflicts"])
+            lines.append(f"  - {name}: 冲突({cs})")
+        else:
+            lines.append(f"  - {name}: 空闲")
+    if status == "free":
+        verdict = f"预检选中空闲账号 {free_name}({free_uid})"
+    elif status == "query_failed":
+        verdict = f"预检不可用(REST查询失败)，降级用 {free_name}({free_uid}) 尽力而为"
+    else:
+        verdict = f"预检结果={status}，选定 {free_name}({free_uid})"
+    _log.info("冲突预检：\n%s\n  => %s", "\n".join(lines), verdict)
+
+
 def create_meeting_smart(subject, start_ts, duration_min, prefer="web", on_progress=None):
     """智能建会：遍历候选账号找一个请求时段空闲的建会；全冲突则返回冲突明细、不建会。
     建会方式：
@@ -385,6 +429,12 @@ def create_meeting_smart(subject, start_ts, duration_min, prefer="web", on_progr
     end_ts = start_ts + duration_min * 60
     precheck_deadline = time.monotonic() + PRECHECK_TIMEOUT
     free_name, free_uid, details, status = find_free_account(candidates, start_ts, end_ts, buf, deadline=precheck_deadline)
+
+    # 把「先查会议列表、再挑空闲账号」这一步显式打到日志（控制台 + app.log 双写）
+    log_precheck(details, status, free_name, free_uid)
+    if on_progress:
+        on_progress(0, "已预检会议列表，开始按空闲账号逐个建会")
+
     if free_name is None:
         # status == "conflict"：所有账号均有真实冲突
         return {"ok": False, "reason": "conflict", "buffer": buf, "details": details}
@@ -392,30 +442,48 @@ def create_meeting_smart(subject, start_ts, duration_min, prefer="web", on_progr
         # 冲突检测依赖的 REST 查询不可用（如接口未开通/凭证问题），不再据此拒绝建会，
         # 降级为「尽力而为」：直接用网页建会（网页建会本身可用，真实冲突由腾讯侧兜底）。
         errs = "; ".join(f"{n}:{d['error']}" for n, d in details.items() if d.get("error"))
-        print(f"[冲突检测不可用] REST 查询失败（{errs}），降级为直接网页建会（账号 {free_name}）。"
-              f"真实时段冲突将由腾讯会议侧校验。")
+        _log.warning("[冲突检测不可用] REST 查询失败（%s），降级为直接网页建会（账号 %s）。真实时段冲突将由腾讯会议侧校验。", errs, free_name)
 
     prefer = os.getenv("CREATE_METHOD", prefer or "web")
     allow_rest_fallback = os.getenv("ALLOW_REST_FALLBACK", "0") == "1"
-    # 备选账号顺序：先试用冲突预检挑中的账号，再依次尝试其余账号，
-    # 避免单个账号的登录态/表单差异（如某账号表单字段结构不同）导致整体失败。
-    acct_order = [(free_name, free_uid)] + [(n, u) for (n, u) in candidates if u != free_uid]
+    # 组装尝试顺序：
+    #  - 预检成功(free)：优先用挑中的空闲账号；兜底只追加「同样空闲/未知」的账号，
+    #    不再盲目遍历所有账号（跳过已确认冲突的账号，免得拿它去建会又撞冲突）。
+    #  - 预检不可用(query_failed)：按原顺序全部尝试（尽力而为）。
+    if status == "free":
+        others = [(n, u) for (n, u) in candidates if u != free_uid]
+        fallback = [(n, u) for (n, u) in others
+                    if not details.get(n, {}).get("conflicts")]  # 跳过已确认冲突的账号
+        acct_order = [(free_name, free_uid)] + fallback
+        _log.info("[建会决策] 预检选中空闲账号 %s(%s)；兜底候选 %d 个（已排除冲突账号）。",
+                  free_name, free_uid, len(fallback))
+    else:
+        acct_order = [(free_name, free_uid)] + [(n, u) for (n, u) in candidates if u != free_uid]
+
     if prefer == "web":
         web_errs = []
         for an, au in acct_order:
+            # 每一步进度都带上账号名，日志里一眼看出「正在用哪个账号建会」
+            def _prog(i, m, _an=an):
+                if on_progress:
+                    on_progress(i, f"[{_an}] {m}")
+            _log.info("[建会] ▶ 开始用账号 %s(%s) 建会（方式=web）", an, au)
             try:
-                return _create_via_web(an, au, subject, start_ts, duration_min, on_progress=on_progress)
+                return _create_via_web(an, au, subject, start_ts, duration_min, on_progress=_prog)
             except Exception as e:
                 web_errs.append(f"{an}({au}): {e}")
                 # 表单输入校验类错误（主题/时间等）在所有账号上必然复现，换账号重试无意义，直接抛出
                 if _is_hard_input_error(e):
-                    print(f"[web-create 输入校验失败，停止换账号重试] {an}: {e}")
+                    _log.warning("[建会] ✗ 账号 %s 输入校验失败（换账号必复现，停止重试）：%s", an, e)
                     raise
-                print(f"[web-create 账号 {an} 失败，尝试下一个] {e}")
+                reason = str(e) or type(e).__name__
+                _log.warning("[建会] ✗ 账号 %s 建会失败，切换到下一个账号。原因：%s", an, reason)
+                if on_progress:
+                    on_progress(0, f"[{an}] ✗ 建会失败：{reason}（尝试下一个账号）")
                 continue
         # 所有账号网页建会均失败
         if allow_rest_fallback:
-            print(f"[所有账号网页建会失败，回退 REST] {'; '.join(web_errs)}")
+            _log.warning("[所有账号网页建会失败，回退 REST] %s", "; ".join(web_errs))
         else:
             raise RuntimeError("网页建会失败（已禁用 REST 回退以保留配额）：" + " | ".join(web_errs))
 

@@ -13,6 +13,7 @@
 
 import os
 import sys
+import logging
 import time
 import threading
 import uuid
@@ -34,10 +35,79 @@ from dotenv import load_dotenv
 load_dotenv(str(PY / ".env"))
 load_dotenv(str(BASE / ".env"))
 
+
+# ---------- 日志：控制台 + 文件双写，建会卡住时可据此定位 ----------
+def _setup_logging():
+    # debug 重载会重复 import，避免重复挂 handler
+    if getattr(_setup_logging, "_done", False):
+        return logging.getLogger("app")
+    _setup_logging._done = True
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%H:%M:%S")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+
+    # 保存原始 stdout/stderr，供 StreamHandler 与 print 重定向使用，避免递归
+    real_stdout = sys.stdout
+    real_stderr = sys.stderr
+
+    sh = logging.StreamHandler(real_stdout)
+    sh.setFormatter(fmt)
+    root.addHandler(sh)
+    try:
+        fh = logging.FileHandler(str(BASE / "app.log"), encoding="utf-8")
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
+    except Exception:
+        fh = None
+    # werkzeug 默认把每个请求（含每秒轮询）都打印到控制台，降噪为 WARNING
+    logging.getLogger("werkzeug").setLevel(logging.WARNING)
+
+    # 仅作为主程序运行（而非被测 import）时，把 print 也写入 app.log。
+    # 这样 create_via_web.py 内部的 print 既能实时显示在控制台，也会落盘到文件。
+    if __name__ == "__main__":
+        _install_print_tee(real_stdout, real_stderr, fh)
+    return logging.getLogger("app")
+
+
+def _install_print_tee(real_stdout, real_stderr, fh):
+    """把 sys.stdout/stderr 重定向：原始内容照常打印到控制台，同时把每一行也写进 app.log。
+    用独立的 fileonly logger（只挂 FileHandler、不向 root 冒泡），避免与上方 StreamHandler 重复打印到控制台。"""
+    fileonly = logging.getLogger("__print__")
+    fileonly.propagate = False
+    fileonly.setLevel(logging.INFO)
+    if fh is not None:
+        fileonly.addHandler(fh)
+
+    class _Tee:
+        def __init__(self, real, lvl):
+            self.real = real
+            self.lvl = lvl
+
+        def write(self, data):
+            self.real.write(data)  # 实时控制台
+            if data and not data.isspace():
+                fileonly.log(self.lvl, data.rstrip("\r\n"))  # 仅落盘 app.log
+
+        def flush(self):
+            self.real.flush()
+
+    sys.stdout = _Tee(real_stdout, logging.INFO)
+    sys.stderr = _Tee(real_stderr, logging.ERROR)
+
+
+logger = _setup_logging()
+
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
 
 app = Flask(__name__, static_folder=str(BASE / "static"), static_url_path="")
 cards.init_db()
+
+try:
+    _accts = tm.get_candidate_accounts()
+except Exception:
+    _accts = []
+logger.info("会议卡密后端启动：port=%s 账号数=%d db=%s",
+            os.getenv("PORT", "5000"), len(_accts), cards.DB_PATH)
 
 
 @app.after_request
@@ -46,6 +116,15 @@ def _cors(resp):
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
     resp.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
     return resp
+
+
+@app.before_request
+def _log_request():
+    p = request.path
+    # 进度轮询 / 静态资源高频，降噪
+    if p == "/api/meeting/progress" or p.startswith("/static"):
+        return
+    logger.info("→ %s %s", request.method, p)
 
 
 def _err(reason, status=400, **extra):
@@ -110,18 +189,34 @@ def _emit_progress(task_id, index, message):
             s["message"] = message
 
 
-def _run_create(task_id, code, subject, start, duration):
+def _fmt_ts(ts):
     try:
+        return time.strftime("%m-%d %H:%M", time.localtime(int(ts)))
+    except Exception:
+        return str(ts)
+
+
+def _run_create(task_id, code, subject, start, duration):
+    short = task_id[:8]
+    logger.info("[建会 %s] 开始：卡密=%s 主题=%r 时间=%s 时长=%d分",
+                short, code, subject, _fmt_ts(start), duration)
+    try:
+        def _on_prog(i, m):
+            _emit_progress(task_id, i, m)
+            logger.info("[建会 %s] 进度%d: %s", short, i, m)
+
         res = tm.create_meeting_smart(
             subject, start, duration,
-            on_progress=lambda i, m: _emit_progress(task_id, i, m),
+            on_progress=_on_prog,
         )
     except Exception as e:
+        logger.exception("[建会 %s] 建会异常：%s", short, e)
         with TASK_LOCK:
             TASKS[task_id].update({"done": True, "ok": False,
                                    "error": {"reason": "create_failed", "detail": str(e)}})
         return
     if not res["ok"]:
+        logger.warning("[建会 %s] 建会未成功：reason=%s", short, res.get("reason"))
         with TASK_LOCK:
             TASKS[task_id].update({"done": True, "ok": False,
                                    "error": {"reason": res.get("reason"),
@@ -131,12 +226,15 @@ def _run_create(task_id, code, subject, start, duration):
     # 管理员密钥不扣额度（免额度、免有效期）；其它卡正常消耗一次
     if not _is_admin_code(code):
         cards.consume(code)
+        logger.info("[建会 %s] 已扣减卡密 %s 额度", short, code)
     end_ts = start + duration * 60
     # 记录本次会议（管理员密钥也记录，code 记为 ADMIN_TOKEN，便于全局会议记录里可见）
     cards.record_meeting(
         code, res["code"], subject, res["url"], res["account"],
         res.get("host_key", ""), start, end_ts,
     )
+    logger.info("[建会 %s] 成功：会议号=%s 账号=%s 方式=%s 链接=%s",
+                short, res["code"], res["account"], res.get("method"), res["url"])
     invite = {
         "account": res["account"],
         "url": res["url"],
@@ -440,4 +538,5 @@ def admin_page():
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    # use_reloader=False：避免 debug 重载器另起子进程吞掉控制台输出（「看不到任何日志」的主因）
+    app.run(host="0.0.0.0", port=port, debug=True, use_reloader=False)
