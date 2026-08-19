@@ -746,6 +746,47 @@ def create_meeting(userid, subject, start_ts, end_ts, host_key="", headless=True
     return box["v"]
 
 
+def _advanced_settings_need_expand(sched):
+    """判断「更多设置」折叠区是否需要展开。
+
+    折叠区在默认收起时，高级选项（主持人密钥、允许成员提前加入等）要么不进 DOM
+    （v-if，get_by_text 匹配数为 0），要么 display:none（文本能匹配但不可点击）。
+    两种情况都视为「需要展开」。
+    """
+    loc = sched.get_by_text("开启密钥", exact=False).first
+    try:
+        if loc.count() == 0:
+            return True
+        return not loc.first.is_visible()
+    except Exception:
+        return True
+
+
+def _ensure_advanced_settings_expanded(sched):
+    """腾讯会议创建页的「主持人密钥」「允许成员在主持人进会前加入会议」等高级选项，
+    可能藏在「更多设置」折叠区（默认折叠），导致文本不可点击。先尝试展开一次。
+    用 _advanced_settings_need_expand 判断，避免对已经展开的页面重复点击而收起。
+    """
+    if not _advanced_settings_need_expand(sched):
+        print("[create] 「更多设置」已展开，跳过展开步骤")
+        return True
+    for txt in ("更多设置", "高级设置", "会议设置"):
+        try:
+            head = sched.get_by_text(txt, exact=False).first
+            if head.count() == 0:
+                continue
+            head.click(timeout=4000)
+            sched.wait_for_timeout(600)
+            if not _advanced_settings_need_expand(sched):
+                print(f"[create] 已展开「{txt}」折叠区")
+                return True
+            print(f"[warn] 点击「{txt}」后仍未展开，尝试下一个候选")
+        except Exception as e:
+            print(f"[warn] 展开「{txt}」失败（继续尝试）: {e}")
+    print("[warn] 未能自动展开「更多设置」折叠区，高级选项（密钥等）可能无法设置")
+    return False
+
+
 def _create_meeting_sync(userid, subject, start_ts, end_ts, host_key="", headless=True, on_progress=None):
     """建会核心逻辑（同步，在 create_meeting 的独立线程中执行）。"""
     profile = PROFILE_DIR / userid
@@ -761,6 +802,9 @@ def _create_meeting_sync(userid, subject, start_ts, end_ts, host_key="", headles
         sched = _open_scheduler(ctx, page)
         if on_progress:
             on_progress(1, PROGRESS_STEPS[1])
+
+        # ---- 先展开「更多设置」折叠区（高级选项默认折叠，不展开则密钥/提前加入等无法设置）----
+        _ensure_advanced_settings_expanded(sched)
 
         # ---- 取消勾选「允许成员在主持人进会前加入会议」（默认勾选，需主动关掉）----
         try:
@@ -781,21 +825,55 @@ def _create_meeting_sync(userid, subject, start_ts, end_ts, host_key="", headles
                 else:
                     print("[create] 「允许成员在主持人进会前加入会议」本就未勾选，跳过")
             else:
-                print("[warn] 未找到「允许成员在主持人进会前加入会议」复选框，跳过")
+                print("[warn] 未找到「允许成员在主持人进会前加入会议」复选框（折叠区可能未展开或页面改版），跳过")
         except Exception as e:
             print(f"[warn] 处理「允许成员在主持人进会前加入会议」失败（跳过）: {e}")
 
-        # ---- 主持人密钥：勾选「开启密钥」复选框（点击 label 切换，原生 input 是 readonly），再填值 ----
+        # ---- 主持人密钥：勾选「开启密钥」开关，再填值 ----
         if on_progress:
             on_progress(2, PROGRESS_STEPS[2])
         if host_key:
             try:
-                chk_label = sched.get_by_text("开启密钥", exact=False).first
-                chk_label.click(timeout=5000)
-                sched.wait_for_timeout(800)
-                # 填密钥值（真实占位符：请输入6位数字密钥）
-                sched.fill('input[placeholder="请输入6位数字密钥"]', host_key)
-                print(f"[create] 主持人密钥: {host_key}")
+                label = sched.get_by_text("开启密钥", exact=False).first
+                n_match = label.count()
+                try:
+                    visible = label.first.is_visible()
+                except Exception:
+                    visible = False
+                print(f"[create] 定位「开启密钥」: 匹配 {n_match} 个, 首元素可见={visible}")
+                if n_match == 0:
+                    print("[warn] 未找到「开启密钥」文本（折叠区可能未展开或页面改版），跳过密钥设置")
+                else:
+                    # 多策略点击：文本标签 / 父级开关 / 同行 role=switch，逐一尝试
+                    clicked = False
+                    strategies = [
+                        ("点击文本标签", lambda: label.click(timeout=8000)),
+                        ("点击父级开关/label",
+                         lambda: label.locator(
+                             "xpath=ancestor::*[self::label or @role='switch' or "
+                             "contains(@class,'switch') or contains(@class,'met-switch')][1]"
+                         ).click(timeout=8000)),
+                        ("点击同行 role=switch",
+                         lambda: label.locator(
+                             "xpath=ancestor::*[contains(@class,'row') or contains(@class,'item') "
+                             "or contains(@class,'form-item')][1]"
+                         ).locator("[role='switch'],button,.tea-switch,.met-switch").first.click(timeout=8000)),
+                    ]
+                    for name, act in strategies:
+                        try:
+                            act()
+                            clicked = True
+                            print(f"[create] 已开启密钥（策略: {name}）")
+                            break
+                        except Exception as e:
+                            print(f"[warn] {name} 失败: {e}")
+                    if not clicked:
+                        print("[warn] 所有开启密钥策略均失败，跳过密钥设置")
+                    else:
+                        sched.wait_for_timeout(800)
+                        # 填密钥值（真实占位符：请输入6位数字密钥）
+                        sched.fill('input[placeholder="请输入6位数字密钥"]', host_key)
+                        print(f"[create] 主持人密钥: {host_key}")
             except Exception as e:
                 print(f"[warn] 设置主持人密钥失败（跳过）: {e}")
 
